@@ -1,0 +1,22 @@
+# Build directory
+build/
+
+# Package file
+*.shell-extension.zip
+
+# Compiled schemas (generated during build)
+src/schemas/gschemas.compiled
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.auto-theme-switcher" path="/org/gnome/shell/extensions/auto-theme-switcher/">
+
+    <key name="light-theme" type="s">
+      <default>'Adwaita'</default>
+      <summary>The GTK theme to use during the day.</summary>
+    </key>
+
+    <key name="dark-theme" type="s">
+      <default>'Adwaita-dark'</default>
+      <summary>The GTK theme to use at night.</summary>
+    </key>
+
+    <key name="night-light-mode" type="s">
+      <default>'disabled'</default>
+      <summary>Night Light control mode ('disabled', 'sync-with-theme', or 'custom-schedule').</summary>
+    </key>
+
+    <key name="night-light-start-time" type="s">
+      <default>'20:00'</default>
+      <summary>Time to enable Night Light (HH:MM) when using custom schedule.</summary>
+    </key>
+
+    <key name="night-light-end-time" type="s">
+      <default>'06:00'</default>
+      <summary>Time to disable Night Light (HH:MM) when using custom schedule.</summary>
+    </key>
+
+    <key name="show-notifications" type="b">
+      <default>true</default>
+      <summary>Show notifications when the theme is switched automatically.</summary>
+    </key>
+
+    <key name="light-mode-trigger" type="s">
+      <default>'sunrise'</default>
+      <summary>What time to use for switching to light mode ('first-light', 'dawn', 'sunrise', or 'custom').</summary>
+    </key>
+
+    <key name="dark-mode-trigger" type="s">
+      <default>'golden-hour'</default>
+      <summary>What time to use for switching to dark mode ('golden-hour', 'dusk', 'last-light', or 'custom').</summary>
+    </key>
+
+    <key name="custom-light-time" type="s">
+      <default>'07:00'</default>
+      <summary>The custom time (HH:MM) to switch to light mode if light-mode-trigger is 'custom'.</summary>
+    </key>
+
+    <key name="custom-dark-time" type="s">
+      <default>'19:00'</default>
+      <summary>The custom time (HH:MM) to switch to dark mode if dark-mode-trigger is 'custom'.</summary>
+    </key>
+
+  </schema>
+</schemalist>
