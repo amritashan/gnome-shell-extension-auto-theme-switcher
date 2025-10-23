@@ -2,6 +2,66 @@
 <schemalist>
   <schema id="org.gnome.shell.extensions.auto-theme-switcher" path="/org/gnome/shell/extensions/auto-theme-switcher/">
 
+    <key name="auto-detect-location" type="b">
+      <default>false</default>
+      <summary>Automatically detect location and calculate sunrise/sunset times.</summary>
+    </key>
+
+    <key name="use-manual-coordinates" type="b">
+      <default>false</default>
+      <summary>Use manually entered coordinates instead of custom times.</summary>
+    </key>
+
+    <key name="manual-latitude" type="s">
+      <default>''</default>
+      <summary>Manual latitude for sunrise/sunset calculation.</summary>
+    </key>
+
+    <key name="manual-longitude" type="s">
+      <default>''</default>
+      <summary>Manual longitude for sunrise/sunset calculation.</summary>
+    </key>
+
+    <key name="control-brightness" type="b">
+      <default>false</default>
+      <summary>Control screen brightness gradually throughout the day.</summary>
+    </key>
+
+    <key name="light-brightness" type="i">
+      <default>100</default>
+      <summary>Screen brightness percentage for light mode (0-100).</summary>
+    </key>
+
+    <key name="dark-brightness" type="i">
+      <default>50</default>
+      <summary>Screen brightness percentage for dark mode (0-100).</summary>
+    </key>
+
+    <key name="last-brightness-update" type="s">
+      <default>'0'</default>
+      <summary>Timestamp (in milliseconds) of the last brightness update.</summary>
+    </key>
+
+    <key name="gradual-brightness-decrease-enabled" type="b">
+      <default>false</default>
+      <summary>Enable gradual brightness decrease before dark mode.</summary>
+    </key>
+
+    <key name="gradual-brightness-decrease-duration" type="i">
+      <default>7200</default>
+      <summary>Duration in seconds to gradually decrease brightness before dark mode trigger (default: 2 hours).</summary>
+    </key>
+
+    <key name="gradual-brightness-increase-enabled" type="b">
+      <default>false</default>
+      <summary>Enable gradual brightness increase before light mode.</summary>
+    </key>
+
+    <key name="gradual-brightness-increase-duration" type="i">
+      <default>7200</default>
+      <summary>Duration in seconds to gradually increase brightness before light mode trigger (default: 2 hours).</summary>
+    </key>
+
     <key name="light-theme" type="s">
       <default>'Adwaita'</default>
       <summary>The GTK theme to use during the day.</summary>
@@ -34,12 +94,12 @@
 
     <key name="light-mode-trigger" type="s">
       <default>'sunrise'</default>
-      <summary>What time to use for switching to light mode ('first-light', 'dawn', 'sunrise', or 'custom').</summary>
+      <summary>What time to use for switching to light mode ('first-light', 'dawn', 'sunrise', 'solar-noon', or 'custom').</summary>
     </key>
 
     <key name="dark-mode-trigger" type="s">
       <default>'golden-hour'</default>
-      <summary>What time to use for switching to dark mode ('golden-hour', 'dusk', 'last-light', or 'custom').</summary>
+      <summary>What time to use for switching to dark mode ('solar-noon', 'golden-hour', 'sunset', 'dusk', 'last-light', or 'custom').</summary>
     </key>
 
     <key name="custom-light-time" type="s">

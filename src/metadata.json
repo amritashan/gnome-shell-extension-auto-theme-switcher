@@ -1,6 +1,6 @@
 {
     "name": "Automatic Theme Switcher",
-    "description": "Automatically switches between light and dark themes based on sunrise/sunset times for your location. Supports multiple trigger options (golden hour, dawn, dusk, etc.) and syncs with Night Light.",
+    "description": "Automatically switches between light and dark themes based on sunrise/sunset times for your location. Supports multiple trigger options (golden hour, dawn, dusk, etc.), gradual brightness transitions, and syncs with Night Light. Uses ipinfo.io, sunrisesunset.io, and openstreetmap.org services.",
     "uuid": "auto-theme-switcher@amritashan.github.io",
     "shell-version": ["45", "46", "47", "48", "49"],
     "version": 1,
