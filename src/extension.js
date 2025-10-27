@@ -161,11 +161,17 @@ export default class ThemeSwitcherExtension extends Extension {
                     if (!sleeping) {
                         // System is resuming from suspend
                         console.log('ThemeSwitcher: System resumed from suspend, re-evaluating theme');
+                        // Clear any existing resume timeout
+                        if (this._resumeTimeoutId) {
+                            GLib.source_remove(this._resumeTimeoutId);
+                            this._resumeTimeoutId = null;
+                        }
                         // Re-evaluate and reschedule after a short delay to ensure system is ready
-                        GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RESUME_DELAY_SECONDS, () => {
+                        this._resumeTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RESUME_DELAY_SECONDS, () => {
                             if (!this._manualModeActive) {
                                 this._scheduleNextChangeEvent();
                             }
+                            this._resumeTimeoutId = null;
                             return GLib.SOURCE_REMOVE;
                         });
                     }
@@ -209,6 +215,11 @@ export default class ThemeSwitcherExtension extends Extension {
         if (this._brightnessTimeoutId) {
             GLib.source_remove(this._brightnessTimeoutId);
             this._brightnessTimeoutId = null;
+        }
+
+        if (this._resumeTimeoutId) {
+            GLib.source_remove(this._resumeTimeoutId);
+            this._resumeTimeoutId = null;
         }
 
         // Unsubscribe from suspend/resume signals
@@ -799,7 +810,26 @@ export default class ThemeSwitcherExtension extends Extension {
         };
     }
 
-    _scheduleBrightnessUpdates() {
+    async _checkCommandAvailable(command) {
+        try {
+            const proc = new Gio.Subprocess({
+                argv: ['which', command],
+                flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
+            });
+            proc.init(null);
+
+            // Wait for the process to complete
+            await proc.wait_check_async(null);
+            const success = proc.get_successful();
+
+            return success;
+        } catch (e) {
+            // Command not found or failed - this is expected for 'which' when command doesn't exist
+            return false;
+        }
+    }
+
+    async _scheduleBrightnessUpdates() {
         // Clear any existing brightness timer
         if (this._brightnessTimeoutId) {
             GLib.source_remove(this._brightnessTimeoutId);
@@ -813,14 +843,9 @@ export default class ThemeSwitcherExtension extends Extension {
         }
 
         // Check if brightnessctl is available
-        try {
-            const [success] = GLib.spawn_command_line_sync('which brightnessctl');
-            if (!success) {
-                console.log('ThemeSwitcher: brightnessctl not found, brightness control disabled');
-                return;
-            }
-        } catch (e) {
-            console.log('ThemeSwitcher: brightnessctl not available');
+        const isBrightnessctlAvailable = await this._checkCommandAvailable('brightnessctl');
+        if (!isBrightnessctlAvailable) {
+            console.log('ThemeSwitcher: brightnessctl not found, brightness control disabled');
             return;
         }
 

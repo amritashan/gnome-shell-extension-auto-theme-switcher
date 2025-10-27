@@ -18,9 +18,9 @@ mkdir -p "$BUILD_DIR"
 echo "Copying files to build directory..."
 cp -r "$SRC_DIR"/* "$BUILD_DIR/"
 
-# Compile schemas
-echo "Compiling schemas..."
-glib-compile-schemas "$BUILD_DIR/schemas/"
+# Note: Do NOT compile schemas for GNOME 45+
+# The schema will be compiled automatically during installation
+# Including gschemas.compiled will cause EGO review rejection
 
 # Create zip package in build directory
 echo "Creating package..."

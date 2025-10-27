@@ -1210,6 +1210,7 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             // Clear widget references to allow garbage collection
             this._debugLabels = null;
             this._nextEventTimestamp = null;
+            this.settings = null;
             return false;
         });
     }

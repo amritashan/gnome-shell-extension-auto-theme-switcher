@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Deployment script for GNOME Shell extension
+# For local development/testing - installs directly to extensions directory
 
 EXTENSION_UUID="auto-theme-switcher@amritashan.github.io"
 EXTENSION_DIR="$HOME/.local/share/gnome-shell/extensions/$EXTENSION_UUID"
@@ -23,8 +24,10 @@ mkdir -p "$EXTENSION_DIR"
 echo "Copying files..."
 cp -r src/* "$EXTENSION_DIR/"
 
-# Compile the schema
-echo "Compiling schema..."
+# Note: For GNOME 44+, schemas are compiled automatically on enable/login
+# Manual compilation is only needed if you want to test immediately without restart
+# For production packages (package.sh), do NOT include gschemas.compiled
+echo "Compiling schema for local testing..."
 glib-compile-schemas "$EXTENSION_DIR/schemas/"
 
 echo "Deployment complete!"
