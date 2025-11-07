@@ -26,7 +26,6 @@ const ThemeSwitcherIface = `
 
 export default class ThemeSwitcherExtension extends Extension {
     enable() {
-        console.log('ThemeSwitcher: Extension enable() called - VERSION 2.0');
         this._settings = this.getSettings();
         this._interfaceSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.interface' });
         this._colorSettings = new Gio.Settings({ schema_id: 'org.gnome.settings-daemon.plugins.color' });
@@ -38,6 +37,9 @@ export default class ThemeSwitcherExtension extends Extension {
         this._loginManager = null;
         this._lightTime = null;
         this._darkTime = null;
+        this._sessionModeSignalId = null;
+        this._screenSaverProxy = null;
+        this._screenSaverSignalId = null;
 
         // Initialize default themes from current system theme on first run
         this._initializeDefaultThemes();
@@ -46,61 +48,56 @@ export default class ThemeSwitcherExtension extends Extension {
         this._dbus = Gio.DBusExportedObject.wrapJSObject(ThemeSwitcherIface, this);
         this._dbus.export(Gio.DBus.session, '/org/gnome/Shell/Extensions/AutoThemeSwitcher');
 
+        // Setup lock/unlock detection with multiple fallback methods
+        this._setupLockUnlockDetection();
+
         // Listen for system suspend/resume events
         this._setupSuspendResumeHandler();
 
         // Listen for settings changes that require re-scheduling
         this._autoDetectChangedId = this._settings.connect('changed::auto-detect-location', () => {
-            console.log('ThemeSwitcher: Auto-detect setting changed, re-scheduling...');
             if (!this._manualModeActive) {
                 this._scheduleNextChangeEvent();
             }
         });
 
         this._lightTriggerChangedId = this._settings.connect('changed::light-mode-trigger', () => {
-            console.log('ThemeSwitcher: Light mode trigger changed, re-scheduling...');
             if (!this._manualModeActive) {
                 this._scheduleNextChangeEvent();
             }
         });
 
         this._darkTriggerChangedId = this._settings.connect('changed::dark-mode-trigger', () => {
-            console.log('ThemeSwitcher: Dark mode trigger changed, re-scheduling...');
             if (!this._manualModeActive) {
                 this._scheduleNextChangeEvent();
             }
         });
 
         this._customLightTimeChangedId = this._settings.connect('changed::custom-light-time', () => {
-            console.log('ThemeSwitcher: Custom light time changed, re-scheduling...');
             if (!this._manualModeActive) {
                 this._scheduleNextChangeEvent();
             }
         });
 
         this._customDarkTimeChangedId = this._settings.connect('changed::custom-dark-time', () => {
-            console.log('ThemeSwitcher: Custom dark time changed, re-scheduling...');
             if (!this._manualModeActive) {
                 this._scheduleNextChangeEvent();
             }
         });
 
         this._useManualCoordsChangedId = this._settings.connect('changed::use-manual-coordinates', () => {
-            console.log('ThemeSwitcher: Manual coordinates toggle changed, re-scheduling...');
             if (!this._manualModeActive) {
                 this._scheduleNextChangeEvent();
             }
         });
 
         this._manualLatitudeChangedId = this._settings.connect('changed::manual-latitude', () => {
-            console.log('ThemeSwitcher: Manual latitude changed, re-scheduling...');
             if (!this._manualModeActive) {
                 this._scheduleNextChangeEvent();
             }
         });
 
         this._manualLongitudeChangedId = this._settings.connect('changed::manual-longitude', () => {
-            console.log('ThemeSwitcher: Manual longitude changed, re-scheduling...');
             if (!this._manualModeActive) {
                 this._scheduleNextChangeEvent();
             }
@@ -108,25 +105,87 @@ export default class ThemeSwitcherExtension extends Extension {
 
         // Listen for brightness control setting changes
         this._controlBrightnessChangedId = this._settings.connect('changed::control-brightness', () => {
-            console.log('ThemeSwitcher: Brightness control toggled, updating brightness schedule...');
             this._scheduleBrightnessUpdates();
         });
 
         this._lightBrightnessChangedId = this._settings.connect('changed::light-brightness', () => {
-            console.log('ThemeSwitcher: Light brightness changed, updating...');
             this._updateBrightness();
         });
 
         this._darkBrightnessChangedId = this._settings.connect('changed::dark-brightness', () => {
-            console.log('ThemeSwitcher: Dark brightness changed, updating...');
             this._updateBrightness();
         });
 
         // Run the main logic loop. It will reschedule itself.
-        this._scheduleNextChangeEvent();
+        // Since enable() only runs on login (not unlock), always set brightness immediately
+        // Note: _scheduleNextChangeEvent() will call _scheduleBrightnessUpdates() after setting times
+        this._scheduleNextChangeEvent(true);
+    }
 
-        // Start brightness control if enabled
-        this._scheduleBrightnessUpdates();
+    _setupLockUnlockDetection() {
+        // Setup multiple methods for detecting lock/unlock for cross-version compatibility
+        //
+        // JUSTIFICATION FOR unlock-dialog SESSION MODE:
+        // This extension includes "unlock-dialog" in session-modes to remain active during screen lock.
+        // This is necessary to:
+        // 1. Detect unlock events via Main.sessionMode transitions (user <-> unlock-dialog)
+        // 2. Apply brightness adjustments ONLY when within a gradual transition window on unlock
+        // 3. Avoid adjusting brightness on every unlock (which would be disruptive)
+        // Without unlock-dialog mode, the extension would be disabled during lock and re-enabled
+        // on unlock, causing enable() to run and always adjust brightness (undesired behavior).
+        // This extension does NOT connect to any keyboard events in unlock-dialog mode.
+        //
+        // Method 1: Main.sessionMode (official GNOME 45+ approach)
+        this._setupSessionModeHandler();
+
+        // Method 2: ScreenSaver D-Bus (fallback for older versions or systems where sessionMode doesn't work)
+        this._setupScreenSaverHandler();
+    }
+
+    _setupSessionModeHandler() {
+        try {
+            // Listen for session mode changes (user <-> unlock-dialog)
+            // This is the official GNOME 45+ approach for detecting lock/unlock
+            this._sessionModeSignalId = Main.sessionMode.connect('updated', () => {
+                const currentMode = Main.sessionMode.currentMode;
+                const parentMode = Main.sessionMode.parentMode;
+
+                // Check if we're transitioning back to user mode (unlock)
+                if (currentMode === 'user' || parentMode === 'user') {
+                    // On unlock, only adjust brightness if we're in an adjustment window
+                    this._updateBrightness(false);
+                }
+            });
+        } catch (e) {
+            console.error(`ThemeSwitcher: Failed to setup session mode handler: ${e}`);
+        }
+    }
+
+    async _setupScreenSaverHandler() {
+        try {
+            // Listen for screen lock/unlock events via D-Bus (fallback method)
+            // Use async to avoid freezing the shell
+            this._screenSaverProxy = await Gio.DBusProxy.new(
+                Gio.DBus.session,
+                Gio.DBusProxyFlags.NONE,
+                null,
+                'org.gnome.ScreenSaver',
+                '/org/gnome/ScreenSaver',
+                'org.gnome.ScreenSaver',
+                null
+            );
+
+            // Connect to ActiveChanged signal
+            // true = locked, false = unlocked
+            this._screenSaverSignalId = this._screenSaverProxy.connectSignal('ActiveChanged', (_proxy, _sender, [isActive]) => {
+                if (!isActive) {
+                    // On unlock, only adjust brightness if we're in an adjustment window
+                    this._updateBrightness(false);
+                }
+            });
+        } catch (e) {
+            console.error(`ThemeSwitcher: Failed to setup ScreenSaver handler: ${e}`);
+        }
     }
 
     _initializeDefaultThemes() {
@@ -138,11 +197,8 @@ export default class ThemeSwitcherExtension extends Extension {
 
         // Check if both are still at default values
         if (lightTheme === 'Adwaita' && darkTheme === 'Adwaita-dark') {
-            console.log(`ThemeSwitcher: First run detected. Setting both themes to current: ${currentTheme}`);
             this._settings.set_string('light-theme', currentTheme);
             this._settings.set_string('dark-theme', currentTheme);
-        } else {
-            console.log(`ThemeSwitcher: Themes already configured: light=${lightTheme}, dark=${darkTheme}`);
         }
     }
 
@@ -160,16 +216,15 @@ export default class ThemeSwitcherExtension extends Extension {
                     const [sleeping] = params.deep_unpack();
                     if (!sleeping) {
                         // System is resuming from suspend
-                        console.log('ThemeSwitcher: System resumed from suspend, re-evaluating theme');
                         // Clear any existing resume timeout
                         if (this._resumeTimeoutId) {
                             GLib.source_remove(this._resumeTimeoutId);
                             this._resumeTimeoutId = null;
                         }
                         // Re-evaluate and reschedule after a short delay to ensure system is ready
-                        this._resumeTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RESUME_DELAY_SECONDS, () => {
+                        this._resumeTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RESUME_DELAY_SECONDS, async () => {
                             if (!this._manualModeActive) {
-                                this._scheduleNextChangeEvent();
+                                await this._scheduleNextChangeEvent();
                             }
                             this._resumeTimeoutId = null;
                             return GLib.SOURCE_REMOVE;
@@ -177,7 +232,6 @@ export default class ThemeSwitcherExtension extends Extension {
                     }
                 }
             );
-            console.log('ThemeSwitcher: Suspend/resume handler installed');
         } catch (e) {
             console.error(`ThemeSwitcher: Failed to setup suspend/resume handler: ${e}`);
         }
@@ -196,93 +250,146 @@ export default class ThemeSwitcherExtension extends Extension {
     ForceThemeSwitch(isDark) {
         this._manualModeActive = true;
         this._switchTheme(isDark, false); // Don't show notification for manual switches
-        console.log('ThemeSwitcher: Manual theme switch activated');
     }
 
     ResetToAutomatic() {
         this._manualModeActive = false;
         this._scheduleNextChangeEvent();
-        console.log('ThemeSwitcher: Reset to automatic mode');
     }
 
     disable() {
         // Clean up when the extension is disabled
-        if (this._timeoutId) {
-            GLib.source_remove(this._timeoutId);
-            this._timeoutId = null;
+        // Use try-catch blocks to ensure all cleanup happens even if individual steps fail
+
+        // Clean up timers
+        try {
+            if (this._timeoutId) {
+                GLib.source_remove(this._timeoutId);
+                this._timeoutId = null;
+            }
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error removing main timeout: ${e}`);
         }
 
-        if (this._brightnessTimeoutId) {
-            GLib.source_remove(this._brightnessTimeoutId);
-            this._brightnessTimeoutId = null;
+        try {
+            if (this._brightnessTimeoutId) {
+                GLib.source_remove(this._brightnessTimeoutId);
+                this._brightnessTimeoutId = null;
+            }
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error removing brightness timeout: ${e}`);
         }
 
-        if (this._resumeTimeoutId) {
-            GLib.source_remove(this._resumeTimeoutId);
-            this._resumeTimeoutId = null;
+        try {
+            if (this._resumeTimeoutId) {
+                GLib.source_remove(this._resumeTimeoutId);
+                this._resumeTimeoutId = null;
+            }
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error removing resume timeout: ${e}`);
+        }
+
+        // Disconnect session mode signal
+        try {
+            if (this._sessionModeSignalId) {
+                Main.sessionMode.disconnect(this._sessionModeSignalId);
+                this._sessionModeSignalId = null;
+            }
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error disconnecting session mode signal: ${e}`);
+            this._sessionModeSignalId = null;
+        }
+
+        // Disconnect ScreenSaver D-Bus signal
+        try {
+            if (this._screenSaverProxy && this._screenSaverSignalId) {
+                this._screenSaverProxy.disconnectSignal(this._screenSaverSignalId);
+                this._screenSaverSignalId = null;
+            }
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error disconnecting ScreenSaver signal: ${e}`);
+            this._screenSaverSignalId = null;
+        }
+
+        // Null out the proxy
+        try {
+            this._screenSaverProxy = null;
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error nulling ScreenSaver proxy: ${e}`);
         }
 
         // Unsubscribe from suspend/resume signals
-        if (this._suspendSignalId) {
-            Gio.DBus.system.signal_unsubscribe(this._suspendSignalId);
+        try {
+            if (this._suspendSignalId) {
+                Gio.DBus.system.signal_unsubscribe(this._suspendSignalId);
+                this._suspendSignalId = null;
+            }
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error unsubscribing from suspend/resume signals: ${e}`);
             this._suspendSignalId = null;
         }
 
-        // Disconnect settings change signals
-        if (this._autoDetectChangedId) {
-            this._settings.disconnect(this._autoDetectChangedId);
-            this._autoDetectChangedId = null;
-        }
-        if (this._lightTriggerChangedId) {
-            this._settings.disconnect(this._lightTriggerChangedId);
-            this._lightTriggerChangedId = null;
-        }
-        if (this._darkTriggerChangedId) {
-            this._settings.disconnect(this._darkTriggerChangedId);
-            this._darkTriggerChangedId = null;
-        }
-        if (this._customLightTimeChangedId) {
-            this._settings.disconnect(this._customLightTimeChangedId);
-            this._customLightTimeChangedId = null;
-        }
-        if (this._customDarkTimeChangedId) {
-            this._settings.disconnect(this._customDarkTimeChangedId);
-            this._customDarkTimeChangedId = null;
-        }
-        if (this._useManualCoordsChangedId) {
-            this._settings.disconnect(this._useManualCoordsChangedId);
-            this._useManualCoordsChangedId = null;
-        }
-        if (this._manualLatitudeChangedId) {
-            this._settings.disconnect(this._manualLatitudeChangedId);
-            this._manualLatitudeChangedId = null;
-        }
-        if (this._manualLongitudeChangedId) {
-            this._settings.disconnect(this._manualLongitudeChangedId);
-            this._manualLongitudeChangedId = null;
-        }
-        if (this._controlBrightnessChangedId) {
-            this._settings.disconnect(this._controlBrightnessChangedId);
-            this._controlBrightnessChangedId = null;
-        }
-        if (this._lightBrightnessChangedId) {
-            this._settings.disconnect(this._lightBrightnessChangedId);
-            this._lightBrightnessChangedId = null;
-        }
-        if (this._darkBrightnessChangedId) {
-            this._settings.disconnect(this._darkBrightnessChangedId);
-            this._darkBrightnessChangedId = null;
+        // Disconnect all settings change signals
+        const settingsSignals = [
+            { id: '_autoDetectChangedId', name: 'auto-detect' },
+            { id: '_lightTriggerChangedId', name: 'light-trigger' },
+            { id: '_darkTriggerChangedId', name: 'dark-trigger' },
+            { id: '_customLightTimeChangedId', name: 'custom-light-time' },
+            { id: '_customDarkTimeChangedId', name: 'custom-dark-time' },
+            { id: '_useManualCoordsChangedId', name: 'use-manual-coords' },
+            { id: '_manualLatitudeChangedId', name: 'manual-latitude' },
+            { id: '_manualLongitudeChangedId', name: 'manual-longitude' },
+            { id: '_controlBrightnessChangedId', name: 'control-brightness' },
+            { id: '_lightBrightnessChangedId', name: 'light-brightness' },
+            { id: '_darkBrightnessChangedId', name: 'dark-brightness' },
+        ];
+
+        for (const signal of settingsSignals) {
+            try {
+                if (this[signal.id]) {
+                    if (this._settings) {
+                        this._settings.disconnect(this[signal.id]);
+                    }
+                    this[signal.id] = null;
+                }
+            } catch (e) {
+                console.error(`ThemeSwitcher: Error disconnecting ${signal.name} signal: ${e}`);
+                this[signal.id] = null;
+            }
         }
 
         // Unexport DBus interface
-        if (this._dbus) {
-            this._dbus.unexport();
+        try {
+            if (this._dbus) {
+                this._dbus.unexport();
+                this._dbus = null;
+            }
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error unexporting DBus interface: ${e}`);
             this._dbus = null;
         }
 
-        this._settings = null;
-        this._interfaceSettings = null;
-        this._colorSettings = null;
+        // Clean up settings objects
+        try {
+            this._settings = null;
+            this._interfaceSettings = null;
+            this._colorSettings = null;
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error cleaning up settings: ${e}`);
+        }
+
+        // Clean up other state variables
+        try {
+            this._debugInfo = null;
+            this._lightTime = null;
+            this._darkTime = null;
+            this._lastBrightnessUpdateTime = null;
+            this._latitude = null;
+            this._longitude = null;
+            this._locationName = null;
+        } catch (e) {
+            console.error(`ThemeSwitcher: Error cleaning up state variables: ${e}`);
+        }
     }
 
     async _getApiData() {
@@ -453,6 +560,11 @@ export default class ThemeSwitcherExtension extends Extension {
 
         console.log(`ThemeSwitcher: Switched to ${isDark ? 'Dark' : 'Light'} theme (${theme}), Night Light mode: ${nightLightMode}`);
 
+        // Update brightness to match the new theme mode
+        // This ensures brightness is always correct when theme switches,
+        // whether gradual transitions are enabled or not
+        this._updateBrightness(true);
+
         // Show notification only if theme actually changed and notifications are enabled
         if (showNotification && !this._manualModeActive && this._settings.get_boolean('show-notifications')) {
             const title = 'Auto Theme Switcher';
@@ -489,9 +601,7 @@ export default class ThemeSwitcherExtension extends Extension {
         }
     }
 
-    async _scheduleNextChangeEvent() {
-        console.log('ThemeSwitcher: _scheduleNextChangeEvent called');
-
+    async _scheduleNextChangeEvent(isInitialEnable = false) {
         // Clear any existing timeout
         if (this._timeoutId) {
             GLib.source_remove(this._timeoutId);
@@ -500,7 +610,6 @@ export default class ThemeSwitcherExtension extends Extension {
 
         const autoDetectLocation = this._settings.get_boolean('auto-detect-location');
         const useManualCoordinates = this._settings.get_boolean('use-manual-coordinates');
-        console.log(`ThemeSwitcher: Auto-detect=${autoDetectLocation}, Manual coords=${useManualCoordinates}`);
         const now = new Date();
 
         let lightTime, darkTime, apiData = null;
@@ -510,7 +619,6 @@ export default class ThemeSwitcherExtension extends Extension {
             apiData = await this._getApiData();
             if (!apiData || !apiData.results) {
                 // If API fails, retry in 15 minutes
-                console.log('ThemeSwitcher: API call failed, retrying in 15 minutes');
                 this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, API_REFRESH_INTERVAL_SECONDS, () => {
                     this._scheduleNextChangeEvent();
                     return GLib.SOURCE_REMOVE;
@@ -567,7 +675,6 @@ export default class ThemeSwitcherExtension extends Extension {
 
         // Validate that we got valid times
         if (!lightTime || !darkTime) {
-            console.error('ThemeSwitcher: Failed to parse times, retrying in 15 minutes');
             this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, API_REFRESH_INTERVAL_SECONDS, () => {
                 this._scheduleNextChangeEvent();
                 return GLib.SOURCE_REMOVE;
@@ -610,14 +717,18 @@ export default class ThemeSwitcherExtension extends Extension {
         this._debugInfo.secondsToNextEvent = secondsToNextEvent;
         this._debugInfo.nextEventType = switchToDark ? 'dark' : 'light';
 
-        console.log(`ThemeSwitcher: Current mode: ${this._debugInfo.currentMode}, Next switch to ${this._debugInfo.nextEventType} in ${secondsToNextEvent} seconds (${nextEventTime.toLocaleString()})`);
-
         // Schedule the timeout
         this._timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secondsToNextEvent, () => {
             this._switchTheme(switchToDark);
             this._scheduleNextChangeEvent(); // Reschedule for the next event in the chain
             return GLib.SOURCE_REMOVE; // Important: remove the old timer
         });
+
+        // On login, always set brightness to appropriate value
+        // Unlock events are handled separately by session mode signals
+        if (isInitialEnable) {
+            this._updateBrightness(true); // Allow static brightness on login
+        }
     }
 
     _parseTriggerTime(trigger, apiResults, now, mode) {
@@ -733,7 +844,7 @@ export default class ThemeSwitcherExtension extends Extension {
                     const dimStartTime = new Date(calcDarkTime.getTime() - (decreaseDuration * MS_PER_SECOND));
 
                     if (now < dimStartTime) {
-                        brightnessState = `Stable at ${lightBrightness}%`;
+                        brightnessState = 'Not in adjustment window';
                         const timeUntilDim = Math.round((dimStartTime.getTime() - now.getTime()) / MS_PER_SECOND);
                         const hours = Math.floor(timeUntilDim / 3600);
                         const minutes = Math.floor((timeUntilDim % 3600) / 60);
@@ -746,8 +857,8 @@ export default class ThemeSwitcherExtension extends Extension {
                         brightnessState = `At ${darkBrightness}%`;
                     }
                 } else {
-                    brightnessState = `Stable at ${lightBrightness}%`;
-                    nextTransition = 'Jumps to dark brightness at dark mode';
+                    brightnessState = 'Not in adjustment window (gradual decrease disabled)';
+                    nextTransition = 'N/A';
                 }
             } else {
                 // During night period
@@ -760,7 +871,7 @@ export default class ThemeSwitcherExtension extends Extension {
                     const brightenStartTime = new Date(nextLightTime.getTime() - (increaseDuration * MS_PER_SECOND));
 
                     if (now < brightenStartTime) {
-                        brightnessState = `Stable at ${darkBrightness}%`;
+                        brightnessState = 'Not in adjustment window';
                         const timeUntilBrighten = Math.round((brightenStartTime.getTime() - now.getTime()) / MS_PER_SECOND);
                         const hours = Math.floor(timeUntilBrighten / 3600);
                         const minutes = Math.floor((timeUntilBrighten % 3600) / 60);
@@ -773,8 +884,8 @@ export default class ThemeSwitcherExtension extends Extension {
                         brightnessState = `At ${lightBrightness}%`;
                     }
                 } else {
-                    brightnessState = `Stable at ${darkBrightness}%`;
-                    nextTransition = 'Jumps to light brightness at light mode';
+                    brightnessState = 'Not in adjustment window (gradual increase disabled)';
+                    nextTransition = 'N/A';
                 }
             }
 
@@ -782,7 +893,7 @@ export default class ThemeSwitcherExtension extends Extension {
                 enabled: true,
                 lightBrightness: `${lightBrightness}%`,
                 darkBrightness: `${darkBrightness}%`,
-                currentBrightness: `${currentBrightness}%`,
+                currentBrightness: currentBrightness !== null ? `${currentBrightness}%` : 'N/A (outside adjustment window)',
                 brightnessState: brightnessState,
                 nextTransition: nextTransition,
                 lastUpdateTimestamp: lastUpdateTimestamp, // Send the actual stored timestamp
@@ -838,102 +949,170 @@ export default class ThemeSwitcherExtension extends Extension {
 
         const controlBrightness = this._settings.get_boolean('control-brightness');
         if (!controlBrightness) {
-            console.log('ThemeSwitcher: Brightness control disabled');
             return;
         }
 
         // Check if brightnessctl is available
         const isBrightnessctlAvailable = await this._checkCommandAvailable('brightnessctl');
         if (!isBrightnessctlAvailable) {
-            console.log('ThemeSwitcher: brightnessctl not found, brightness control disabled');
             return;
         }
 
-        const intervalMinutes = Math.round(BRIGHTNESS_UPDATE_INTERVAL_SECONDS / 60);
-        console.log(`ThemeSwitcher: [SCHEDULE] Starting brightness control (${intervalMinutes}-minute intervals)`);
-
-        let initialDelaySeconds = BRIGHTNESS_UPDATE_INTERVAL_SECONDS;
-
-        try {
-            // Get the last brightness update time from settings (0 if never updated)
-            const lastUpdateStr = this._settings.get_string('last-brightness-update');
-            const lastUpdateTimestamp = parseInt(lastUpdateStr, 10) || 0;
-            const now = new Date().getTime();
-
-            console.log(`ThemeSwitcher: [SCHEDULE] Stored timestamp: ${lastUpdateTimestamp}, Current time: ${now}`);
-
-            // Calculate time since last update
-            const timeSinceLastUpdate = lastUpdateTimestamp > 0 ? (now - lastUpdateTimestamp) / MS_PER_SECOND : BRIGHTNESS_UPDATE_INTERVAL_SECONDS + 1;
-
-            console.log(`ThemeSwitcher: [SCHEDULE] Time since last update: ${Math.round(timeSinceLastUpdate)} seconds (${Math.round(timeSinceLastUpdate / 60)} minutes)`);
-
-            // Initialize the last update time from settings or now
-            this._lastBrightnessUpdateTime = lastUpdateTimestamp > 0 ? lastUpdateTimestamp : now;
-
-            // Update brightness immediately only if the interval has passed
-            if (timeSinceLastUpdate >= BRIGHTNESS_UPDATE_INTERVAL_SECONDS) {
-                console.log(`ThemeSwitcher: [SCHEDULE] Interval passed (${timeSinceLastUpdate} >= ${BRIGHTNESS_UPDATE_INTERVAL_SECONDS}), updating immediately`);
-                this._updateBrightness();
-                // Next update in the full interval
-                initialDelaySeconds = BRIGHTNESS_UPDATE_INTERVAL_SECONDS;
-            } else {
-                // Schedule the next update for the remaining time
-                initialDelaySeconds = Math.ceil(BRIGHTNESS_UPDATE_INTERVAL_SECONDS - timeSinceLastUpdate);
-                const nextUpdateMinutes = Math.round(initialDelaySeconds / 60);
-                console.log(`ThemeSwitcher: [SCHEDULE] Interval NOT passed, next update in ${nextUpdateMinutes} minutes (${initialDelaySeconds} seconds)`);
-            }
-        } catch (e) {
-            console.error(`ThemeSwitcher: Error checking last brightness update: ${e}`);
-            // Fall back to updating immediately
-            this._lastBrightnessUpdateTime = new Date().getTime();
-            this._updateBrightness();
-            initialDelaySeconds = BRIGHTNESS_UPDATE_INTERVAL_SECONDS;
-        }
-
-        // Schedule first update at the calculated delay
-        this._brightnessTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, initialDelaySeconds, () => {
-            this._updateBrightness();
-            // After the first update, reschedule at regular intervals
-            this._brightnessTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, BRIGHTNESS_UPDATE_INTERVAL_SECONDS, () => {
-                this._updateBrightness();
-                return GLib.SOURCE_CONTINUE; // Keep the timer running
-            });
-            return GLib.SOURCE_REMOVE; // Remove this one-time timer
-        });
-    }
-
-    _updateBrightness() {
-        const controlBrightness = this._settings.get_boolean('control-brightness');
-        if (!controlBrightness || !this._lightTime || !this._darkTime) {
-            console.log('ThemeSwitcher: Brightness update skipped (control disabled or times not set)');
+        if (!this._lightTime || !this._darkTime) {
             return;
         }
 
         const now = new Date();
+        const gradualDecreaseEnabled = this._settings.get_boolean('gradual-brightness-decrease-enabled');
+        const gradualIncreaseEnabled = this._settings.get_boolean('gradual-brightness-increase-enabled');
 
+        if (!gradualDecreaseEnabled && !gradualIncreaseEnabled) {
+            return;
+        }
+
+        const decreaseDuration = this._settings.get_int('gradual-brightness-decrease-duration') * MS_PER_SECOND;
+        const increaseDuration = this._settings.get_int('gradual-brightness-increase-duration') * MS_PER_SECOND;
+
+        // Calculate when the next adjustment window starts
+        const inDayPeriod = now >= this._lightTime && now < this._darkTime;
+        let nextWindowStart;
+        let nextWindowEnd;
+
+        if (inDayPeriod) {
+            // During day period - check if we have a dimming window
+            if (gradualDecreaseEnabled) {
+                const dimStartTime = new Date(this._darkTime.getTime() - decreaseDuration);
+                if (now < dimStartTime) {
+                    // Before dimming window starts
+                    nextWindowStart = dimStartTime;
+                    nextWindowEnd = this._darkTime;
+                } else if (now < this._darkTime) {
+                    // Currently in dimming window
+                    nextWindowStart = now;
+                    nextWindowEnd = this._darkTime;
+                } else {
+                    // This shouldn't happen in day period, but handle it
+                    nextWindowStart = null;
+                }
+            } else {
+                nextWindowStart = null;
+            }
+        } else {
+            // During night period - check if we have a brightening window
+            if (gradualIncreaseEnabled) {
+                let nextLightTime = this._lightTime;
+                if (now >= this._darkTime) {
+                    nextLightTime = new Date(this._lightTime.getTime() + MS_PER_DAY);
+                }
+
+                const brightenStartTime = new Date(nextLightTime.getTime() - increaseDuration);
+                if (now < brightenStartTime) {
+                    // Before brightening window starts
+                    nextWindowStart = brightenStartTime;
+                    nextWindowEnd = nextLightTime;
+                } else if (now < nextLightTime) {
+                    // Currently in brightening window
+                    nextWindowStart = now;
+                    nextWindowEnd = nextLightTime;
+                } else {
+                    // This shouldn't happen, but handle it
+                    nextWindowStart = null;
+                }
+            } else {
+                nextWindowStart = null;
+            }
+        }
+
+        // If no window found, need to check the next period
+        if (!nextWindowStart) {
+            // Calculate next window in the opposite period
+            if (inDayPeriod && gradualIncreaseEnabled) {
+                // We're in day, next window is tomorrow's brightening
+                const tomorrowLightTime = new Date(this._lightTime.getTime() + MS_PER_DAY);
+                nextWindowStart = new Date(tomorrowLightTime.getTime() - increaseDuration);
+                nextWindowEnd = tomorrowLightTime;
+            } else if (!inDayPeriod && gradualDecreaseEnabled) {
+                // We're in night, next window is today's or tomorrow's dimming
+                const nextDarkTime = now >= this._darkTime ?
+                    new Date(this._darkTime.getTime() + MS_PER_DAY) :
+                    this._darkTime;
+                nextWindowStart = new Date(nextDarkTime.getTime() - decreaseDuration);
+                nextWindowEnd = nextDarkTime;
+            } else {
+                return;
+            }
+        }
+
+        const secondsUntilWindowStart = Math.max(0, Math.round((nextWindowStart.getTime() - now.getTime()) / MS_PER_SECOND));
+
+        if (secondsUntilWindowStart > 0) {
+            // Schedule to start when the window begins
+            this._brightnessTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secondsUntilWindowStart, () => {
+                this._startBrightnessUpdateLoop(nextWindowEnd);
+                return GLib.SOURCE_REMOVE;
+            });
+        } else {
+            // We're already in a window, start updating now
+            this._startBrightnessUpdateLoop(nextWindowEnd);
+        }
+    }
+
+    _startBrightnessUpdateLoop(windowEnd) {
+        // Update immediately
+        this._updateBrightness();
+
+        // Clear any existing timer
+        if (this._brightnessTimeoutId) {
+            GLib.source_remove(this._brightnessTimeoutId);
+            this._brightnessTimeoutId = null;
+        }
+
+        // Schedule updates every 10 minutes until window ends
+        this._brightnessTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, BRIGHTNESS_UPDATE_INTERVAL_SECONDS, () => {
+            const now = new Date();
+
+            // Check if we're still in the adjustment window
+            if (now >= windowEnd) {
+                this._scheduleBrightnessUpdates(); // Schedule for next window
+                return GLib.SOURCE_REMOVE;
+            }
+
+            this._updateBrightness();
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _updateBrightness(allowStaticBrightness = false) {
+        const controlBrightness = this._settings.get_boolean('control-brightness');
+        if (!controlBrightness || !this._lightTime || !this._darkTime) {
+            return;
+        }
+
+        const now = new Date();
         const lightBrightness = this._settings.get_int('light-brightness');
         const darkBrightness = this._settings.get_int('dark-brightness');
 
-        // Calculate current brightness based on time progression
-        const targetBrightness = this._calculateBrightness(now, lightBrightness, darkBrightness);
+        // Calculate transitional brightness (returns null if outside adjustment window)
+        const transitionalBrightness = this._calculateBrightness(now, lightBrightness, darkBrightness);
 
-        const timeStr = now.toLocaleTimeString();
-        const lightTimeStr = this._lightTime.toLocaleTimeString();
-        const darkTimeStr = this._darkTime.toLocaleTimeString();
-
-        console.log(`ThemeSwitcher: [${timeStr}] Brightness Update:`);
-        console.log(`  Light time: ${lightTimeStr}, Dark time: ${darkTimeStr}`);
-        console.log(`  Light brightness: ${lightBrightness}%, Dark brightness: ${darkBrightness}%`);
-        console.log(`  Calculated target: ${targetBrightness}%`);
+        let targetBrightness;
+        if (transitionalBrightness !== null) {
+            // We're in an adjustment window - use calculated transitional value
+            targetBrightness = transitionalBrightness;
+        } else if (allowStaticBrightness) {
+            // Outside adjustment window but static brightness is allowed (login only)
+            const inDayPeriod = now >= this._lightTime && now < this._darkTime;
+            targetBrightness = inDayPeriod ? lightBrightness : darkBrightness;
+        } else {
+            // Outside adjustment window and not allowed to set static - do nothing (unlock scenario)
+            return;
+        }
 
         try {
             GLib.spawn_command_line_async(`brightnessctl set ${targetBrightness}%`);
-
-            // Store the last update time for debug panel and persist to settings
-            // Only update timestamp if we successfully executed the brightness command
+            // Store the last update time for debug panel
             this._lastBrightnessUpdateTime = now.getTime();
             this._settings.set_string('last-brightness-update', this._lastBrightnessUpdateTime.toString());
-            console.log(`ThemeSwitcher: [UPDATE] Saved new timestamp: ${this._lastBrightnessUpdateTime}`);
         } catch (e) {
             console.error(`ThemeSwitcher: Failed to set brightness: ${e}`);
         }
@@ -973,12 +1152,12 @@ export default class ThemeSwitcherExtension extends Extension {
                     const brightness = lightBrightness + (darkBrightness - lightBrightness) * progress;
                     return Math.round(Math.max(1, Math.min(100, brightness)));
                 } else {
-                    // Before dimming window - stay at light brightness
-                    return lightBrightness;
+                    // Before dimming window - not in adjustment scope
+                    return null;
                 }
             } else {
-                // Gradual decrease disabled - stay at light brightness until dark mode
-                return lightBrightness;
+                // Gradual decrease disabled - no brightness control needed
+                return null;
             }
         } else {
             // During night period (dark mode is active)
@@ -1003,12 +1182,12 @@ export default class ThemeSwitcherExtension extends Extension {
                     const brightness = darkBrightness + (lightBrightness - darkBrightness) * progress;
                     return Math.round(Math.max(1, Math.min(100, brightness)));
                 } else {
-                    // Before brightening window - stay at dark brightness
-                    return darkBrightness;
+                    // Before brightening window - not in adjustment scope
+                    return null;
                 }
             } else {
-                // Gradual increase disabled - stay at dark brightness until light mode
-                return darkBrightness;
+                // Gradual increase disabled - no brightness control needed
+                return null;
             }
         }
     }

@@ -26,7 +26,9 @@ export const FORCE_REFRESH_DEBOUNCE_MS = 2000; // 2 seconds
 export const RESUME_DELAY_SECONDS = 2; // Wait 2 seconds after resume before updating
 
 // Gradual brightness transition duration options (in seconds)
+// Value 0 means "Off" (disabled)
 export const BRIGHTNESS_TRANSITION_DURATIONS = [
+    { label: 'Off', value: 0 },
     { label: '15 minutes', value: 900 },
     { label: '30 minutes', value: 1800 },
     { label: '1 hour', value: 3600 },

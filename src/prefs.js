@@ -207,6 +207,140 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         notificationsRow.activatable_widget = notificationsToggle;
         group.add(notificationsRow);
 
+        // --- Light Mode Trigger Settings ---
+        const lightTriggerGroup = new Adw.PreferencesGroup({ title: 'Light Mode Trigger' });
+        page.add(lightTriggerGroup);
+
+        const lightTriggerRow = new Adw.ComboRow({
+            title: 'Switch to Light Mode at...',
+        });
+        const lightTriggerModel = new Gtk.StringList();
+        lightTriggerModel.append('First Light');
+        lightTriggerModel.append('Dawn');
+        lightTriggerModel.append('Sunrise');
+        lightTriggerModel.append('Solar Noon');
+        lightTriggerModel.append('Specific Time');
+        lightTriggerRow.model = lightTriggerModel;
+        lightTriggerGroup.add(lightTriggerRow);
+
+        const lightTriggerMap = { 0: 'first-light', 1: 'dawn', 2: 'sunrise', 3: 'solar-noon', 4: 'custom' };
+        const savedLightTrigger = this.settings.get_string('light-mode-trigger');
+        const lightTriggerIndex = Object.keys(lightTriggerMap).find(key => lightTriggerMap[key] === savedLightTrigger) || 2;
+        lightTriggerRow.selected = lightTriggerIndex;
+
+        // --- Specific Light Time Entry ---
+        const customLightTimeRow = new Adw.ActionRow({
+            title: 'Specific Light Time (24-hour)',
+        });
+        const customLightTimeEntry = new Gtk.Entry({
+            text: this.settings.get_string('custom-light-time'),
+            valign: Gtk.Align.CENTER,
+        });
+        customLightTimeRow.add_suffix(customLightTimeEntry);
+        lightTriggerGroup.add(customLightTimeRow);
+
+        // Function to update visibility based on auto-detect and manual coordinates settings
+        const updateLightTriggerVisibility = () => {
+            const autoDetectEnabled = this.settings.get_boolean('auto-detect-location');
+            const useManualCoords = this.settings.get_boolean('use-manual-coordinates');
+
+            // Show triggers if auto-detect OR manual coordinates is enabled
+            const showTriggers = autoDetectEnabled || useManualCoords;
+
+            if (showTriggers) {
+                // Show dropdown with all options
+                lightTriggerRow.visible = true;
+                // Show time entry only if 'Specific Time' is selected
+                customLightTimeRow.visible = lightTriggerRow.selected === 3;
+            } else {
+                // Hide dropdown, only show time entry
+                lightTriggerRow.visible = false;
+                customLightTimeRow.visible = true;
+            }
+        };
+
+        // Initial visibility
+        updateLightTriggerVisibility();
+
+        // Update visibility when settings change
+        this.settings.connect('changed::auto-detect-location', updateLightTriggerVisibility);
+        this.settings.connect('changed::use-manual-coordinates', updateLightTriggerVisibility);
+
+        // Show/hide specific light time row based on trigger selection (when auto-detect is on)
+        lightTriggerRow.connect('notify::selected', () => {
+            if (this.settings.get_boolean('auto-detect-location')) {
+                customLightTimeRow.visible = lightTriggerRow.selected === 3;
+            }
+        });
+
+        // --- Dark Mode Trigger Settings ---
+        const darkTriggerGroup = new Adw.PreferencesGroup({ title: 'Dark Mode Trigger' });
+        page.add(darkTriggerGroup);
+
+        const darkTriggerRow = new Adw.ComboRow({
+            title: 'Switch to Dark Mode at...',
+        });
+        const darkTriggerModel = new Gtk.StringList();
+        darkTriggerModel.append('Solar Noon');
+        darkTriggerModel.append('Golden Hour');
+        darkTriggerModel.append('Sunset');
+        darkTriggerModel.append('Dusk');
+        darkTriggerModel.append('Last Light');
+        darkTriggerModel.append('Specific Time');
+        darkTriggerRow.model = darkTriggerModel;
+        darkTriggerGroup.add(darkTriggerRow);
+
+        const darkTriggerMap = { 0: 'solar-noon', 1: 'golden-hour', 2: 'sunset', 3: 'dusk', 4: 'last-light', 5: 'custom' };
+        const savedDarkTrigger = this.settings.get_string('dark-mode-trigger');
+        const darkTriggerIndex = Object.keys(darkTriggerMap).find(key => darkTriggerMap[key] === savedDarkTrigger) || 0;
+        darkTriggerRow.selected = darkTriggerIndex;
+
+        // --- Specific Dark Time Entry ---
+        const customDarkTimeRow = new Adw.ActionRow({
+            title: 'Specific Dark Time (24-hour)',
+        });
+        const customDarkTimeEntry = new Gtk.Entry({
+            text: this.settings.get_string('custom-dark-time'),
+            valign: Gtk.Align.CENTER,
+        });
+        customDarkTimeRow.add_suffix(customDarkTimeEntry);
+        darkTriggerGroup.add(customDarkTimeRow);
+
+        // Function to update visibility based on auto-detect and manual coordinates settings
+        const updateDarkTriggerVisibility = () => {
+            const autoDetectEnabled = this.settings.get_boolean('auto-detect-location');
+            const useManualCoords = this.settings.get_boolean('use-manual-coordinates');
+
+            // Show triggers if auto-detect OR manual coordinates is enabled
+            const showTriggers = autoDetectEnabled || useManualCoords;
+
+            if (showTriggers) {
+                // Show dropdown with all options
+                darkTriggerRow.visible = true;
+                // Show time entry only if 'Specific Time' is selected
+                customDarkTimeRow.visible = darkTriggerRow.selected === 3;
+            } else {
+                // Hide dropdown, only show time entry
+                darkTriggerRow.visible = false;
+                customDarkTimeRow.visible = true;
+            }
+        };
+
+        // Initial visibility
+        updateDarkTriggerVisibility();
+
+        // Update visibility when settings change
+        this.settings.connect('changed::auto-detect-location', updateDarkTriggerVisibility);
+        this.settings.connect('changed::use-manual-coordinates', updateDarkTriggerVisibility);
+
+        // Show/hide specific dark time row based on trigger selection (when auto-detect is on)
+        darkTriggerRow.connect('notify::selected', () => {
+            if (this.settings.get_boolean('auto-detect-location')) {
+                customDarkTimeRow.visible = darkTriggerRow.selected === 3;
+            }
+        });
+
+
         // --- Brightness Control ---
         const brightnessGroup = new Adw.PreferencesGroup({ title: 'Brightness Control' });
         page.add(brightnessGroup);
@@ -352,7 +486,8 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             brightnessGroup.add(installExpander);
         }
 
-        // Brightness sliders (only shown when control-brightness is enabled)
+        // Brightness sliders and gradual transition controls
+        // Grouped: Light Mode Brightness + Gradual Brightening
         const lightBrightnessRow = new Adw.ActionRow({
             title: 'Light Mode Brightness',
             subtitle: 'Screen brightness during light mode (%)',
@@ -376,6 +511,29 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         lightBrightnessRow.add_suffix(lightBrightnessScale);
         brightnessGroup.add(lightBrightnessRow);
 
+        // Gradual Brightening (combined toggle + duration)
+        const increaseDurationRow = new Adw.ComboRow({
+            title: 'Gradual brightening',
+            subtitle: 'Gradually increase brightness before light mode',
+        });
+        const increaseDurationModel = new Gtk.StringList();
+        BRIGHTNESS_TRANSITION_DURATIONS.forEach(duration => {
+            increaseDurationModel.append(duration.label);
+        });
+        increaseDurationRow.model = increaseDurationModel;
+        brightnessGroup.add(increaseDurationRow);
+
+        // Find and set the current selection (Off if disabled, otherwise the duration)
+        const savedIncreaseEnabled = this.settings.get_boolean('gradual-brightness-increase-enabled');
+        const savedIncreaseDuration = this.settings.get_int('gradual-brightness-increase-duration');
+        if (!savedIncreaseEnabled) {
+            increaseDurationRow.selected = 0; // "Off"
+        } else {
+            const increaseIndex = BRIGHTNESS_TRANSITION_DURATIONS.findIndex(d => d.value === savedIncreaseDuration);
+            increaseDurationRow.selected = increaseIndex >= 0 ? increaseIndex : 5; // Default to 2 hours (index 5)
+        }
+
+        // Grouped: Dark Mode Brightness + Gradual Dimming
         const darkBrightnessRow = new Adw.ActionRow({
             title: 'Dark Mode Brightness',
             subtitle: 'Screen brightness during dark mode (%)',
@@ -399,29 +557,10 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         darkBrightnessRow.add_suffix(darkBrightnessScale);
         brightnessGroup.add(darkBrightnessRow);
 
-        // Initialize brightness values from current system brightness
-        if (hasBrightnessctl) {
-            this._initializeBrightnessValues(lightBrightnessScale, darkBrightnessScale);
-        }
-
-        // --- Gradual Brightness Transitions ---
-        // Gradual Decrease (Begin Dimming)
-        const gradualDecreaseRow = new Adw.ActionRow({
-            title: 'Gradually Dim',
-            subtitle: 'Begin dimming before dark mode trigger',
-        });
-        const gradualDecreaseToggle = new Gtk.Switch({
-            active: this.settings.get_boolean('gradual-brightness-decrease-enabled'),
-            valign: Gtk.Align.CENTER,
-        });
-        gradualDecreaseRow.add_suffix(gradualDecreaseToggle);
-        gradualDecreaseRow.activatable_widget = gradualDecreaseToggle;
-        brightnessGroup.add(gradualDecreaseRow);
-
-        // Decrease duration dropdown
+        // Gradual Dimming (combined toggle + duration)
         const decreaseDurationRow = new Adw.ComboRow({
-            title: 'Begin Dimming',
-            subtitle: 'Start decreasing brightness this long before dark mode',
+            title: 'Gradual dimming',
+            subtitle: 'Gradually decrease brightness before dark mode',
         });
         const decreaseDurationModel = new Gtk.StringList();
         BRIGHTNESS_TRANSITION_DURATIONS.forEach(duration => {
@@ -430,61 +569,50 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         decreaseDurationRow.model = decreaseDurationModel;
         brightnessGroup.add(decreaseDurationRow);
 
-        // Find and set the current duration
+        // Find and set the current selection (Off if disabled, otherwise the duration)
+        const savedDecreaseEnabled = this.settings.get_boolean('gradual-brightness-decrease-enabled');
         const savedDecreaseDuration = this.settings.get_int('gradual-brightness-decrease-duration');
-        const decreaseIndex = BRIGHTNESS_TRANSITION_DURATIONS.findIndex(d => d.value === savedDecreaseDuration);
-        decreaseDurationRow.selected = decreaseIndex >= 0 ? decreaseIndex : 4; // Default to 2 hours
+        if (!savedDecreaseEnabled) {
+            decreaseDurationRow.selected = 0; // "Off"
+        } else {
+            const decreaseIndex = BRIGHTNESS_TRANSITION_DURATIONS.findIndex(d => d.value === savedDecreaseDuration);
+            decreaseDurationRow.selected = decreaseIndex >= 0 ? decreaseIndex : 5; // Default to 2 hours (index 5)
+        }
 
-        // Gradual Increase (Begin Brightening)
-        const gradualIncreaseRow = new Adw.ActionRow({
-            title: 'Gradually Brighten',
-            subtitle: 'Begin brightening before light mode trigger',
-        });
-        const gradualIncreaseToggle = new Gtk.Switch({
-            active: this.settings.get_boolean('gradual-brightness-increase-enabled'),
-            valign: Gtk.Align.CENTER,
-        });
-        gradualIncreaseRow.add_suffix(gradualIncreaseToggle);
-        gradualIncreaseRow.activatable_widget = gradualIncreaseToggle;
-        brightnessGroup.add(gradualIncreaseRow);
-
-        // Increase duration dropdown
-        const increaseDurationRow = new Adw.ComboRow({
-            title: 'Begin Brightening',
-            subtitle: 'Start increasing brightness this long before light mode',
-        });
-        const increaseDurationModel = new Gtk.StringList();
-        BRIGHTNESS_TRANSITION_DURATIONS.forEach(duration => {
-            increaseDurationModel.append(duration.label);
-        });
-        increaseDurationRow.model = increaseDurationModel;
-        brightnessGroup.add(increaseDurationRow);
-
-        // Find and set the current duration
-        const savedIncreaseDuration = this.settings.get_int('gradual-brightness-increase-duration');
-        const increaseIndex = BRIGHTNESS_TRANSITION_DURATIONS.findIndex(d => d.value === savedIncreaseDuration);
-        increaseDurationRow.selected = increaseIndex >= 0 ? increaseIndex : 4; // Default to 2 hours
+        // Initialize brightness values from current system brightness
+        if (hasBrightnessctl) {
+            this._initializeBrightnessValues(lightBrightnessScale, darkBrightnessScale);
+        }
 
         // Connect settings changes
-        gradualDecreaseToggle.connect('notify::active', () => {
-            this.settings.set_boolean('gradual-brightness-decrease-enabled', gradualDecreaseToggle.active);
-        });
-
+        // When user selects "Off" (index 0), disable the feature; otherwise enable and set duration
         decreaseDurationRow.connect('notify::selected', () => {
             const selected = decreaseDurationRow.selected;
             if (selected >= 0 && selected < BRIGHTNESS_TRANSITION_DURATIONS.length) {
-                this.settings.set_int('gradual-brightness-decrease-duration', BRIGHTNESS_TRANSITION_DURATIONS[selected].value);
+                const selectedValue = BRIGHTNESS_TRANSITION_DURATIONS[selected].value;
+                if (selectedValue === 0) {
+                    // "Off" selected
+                    this.settings.set_boolean('gradual-brightness-decrease-enabled', false);
+                } else {
+                    // Duration selected
+                    this.settings.set_boolean('gradual-brightness-decrease-enabled', true);
+                    this.settings.set_int('gradual-brightness-decrease-duration', selectedValue);
+                }
             }
-        });
-
-        gradualIncreaseToggle.connect('notify::active', () => {
-            this.settings.set_boolean('gradual-brightness-increase-enabled', gradualIncreaseToggle.active);
         });
 
         increaseDurationRow.connect('notify::selected', () => {
             const selected = increaseDurationRow.selected;
             if (selected >= 0 && selected < BRIGHTNESS_TRANSITION_DURATIONS.length) {
-                this.settings.set_int('gradual-brightness-increase-duration', BRIGHTNESS_TRANSITION_DURATIONS[selected].value);
+                const selectedValue = BRIGHTNESS_TRANSITION_DURATIONS[selected].value;
+                if (selectedValue === 0) {
+                    // "Off" selected
+                    this.settings.set_boolean('gradual-brightness-increase-enabled', false);
+                } else {
+                    // Duration selected
+                    this.settings.set_boolean('gradual-brightness-increase-enabled', true);
+                    this.settings.set_int('gradual-brightness-increase-duration', selectedValue);
+                }
             }
         });
 
@@ -492,18 +620,12 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         const updateBrightnessVisibility = () => {
             const enabled = hasBrightnessctl && this.settings.get_boolean('control-brightness');
             lightBrightnessRow.visible = enabled;
+            increaseDurationRow.visible = enabled;
             darkBrightnessRow.visible = enabled;
-            gradualDecreaseRow.visible = enabled;
-            decreaseDurationRow.visible = enabled && gradualDecreaseToggle.active;
-            gradualIncreaseRow.visible = enabled;
-            increaseDurationRow.visible = enabled && gradualIncreaseToggle.active;
+            decreaseDurationRow.visible = enabled;
         };
         updateBrightnessVisibility();
         this.settings.connect('changed::control-brightness', updateBrightnessVisibility);
-
-        // Also update visibility when toggles change
-        gradualDecreaseToggle.connect('notify::active', updateBrightnessVisibility);
-        gradualIncreaseToggle.connect('notify::active', updateBrightnessVisibility);
 
         // Warning label for time conflicts
         const brightnessWarningRow = new Adw.ActionRow({
@@ -555,10 +677,11 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
                     timeBetween = (24 * 60 * 60 * 1000) - (lightTime.getTime() - darkTime.getTime());
                 }
 
-                const decreaseEnabled = gradualDecreaseToggle.active;
-                const increaseEnabled = gradualIncreaseToggle.active;
-                const decreaseDuration = BRIGHTNESS_TRANSITION_DURATIONS[decreaseDurationRow.selected]?.value || 7200;
-                const increaseDuration = BRIGHTNESS_TRANSITION_DURATIONS[increaseDurationRow.selected]?.value || 7200;
+                // Check if transitions are enabled (not "Off")
+                const decreaseEnabled = decreaseDurationRow.selected > 0;
+                const increaseEnabled = increaseDurationRow.selected > 0;
+                const decreaseDuration = BRIGHTNESS_TRANSITION_DURATIONS[decreaseDurationRow.selected]?.value || 0;
+                const increaseDuration = BRIGHTNESS_TRANSITION_DURATIONS[increaseDurationRow.selected]?.value || 0;
 
                 const timeBetweenSeconds = timeBetween / 1000;
 
@@ -588,146 +711,12 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         this.settings.connect('changed::custom-dark-time', validateBrightnessTransitions);
         this.settings.connect('changed::light-mode-trigger', validateBrightnessTransitions);
         this.settings.connect('changed::dark-mode-trigger', validateBrightnessTransitions);
-        gradualDecreaseToggle.connect('notify::active', validateBrightnessTransitions);
-        gradualIncreaseToggle.connect('notify::active', validateBrightnessTransitions);
         decreaseDurationRow.connect('notify::selected', validateBrightnessTransitions);
         increaseDurationRow.connect('notify::selected', validateBrightnessTransitions);
 
         // Initial validation
         validateBrightnessTransitions();
 
-        // --- Light Mode Trigger Settings ---
-        const lightTriggerGroup = new Adw.PreferencesGroup({ title: 'Light Mode Trigger' });
-        page.add(lightTriggerGroup);
-
-        const lightTriggerRow = new Adw.ComboRow({
-            title: 'Switch to Light Mode at...',
-        });
-        const lightTriggerModel = new Gtk.StringList();
-        lightTriggerModel.append('First Light');
-        lightTriggerModel.append('Dawn');
-        lightTriggerModel.append('Sunrise');
-        lightTriggerModel.append('Solar Noon');
-        lightTriggerModel.append('Specific Time');
-        lightTriggerRow.model = lightTriggerModel;
-        lightTriggerGroup.add(lightTriggerRow);
-
-        const lightTriggerMap = { 0: 'first-light', 1: 'dawn', 2: 'sunrise', 3: 'solar-noon', 4: 'custom' };
-        const savedLightTrigger = this.settings.get_string('light-mode-trigger');
-        const lightTriggerIndex = Object.keys(lightTriggerMap).find(key => lightTriggerMap[key] === savedLightTrigger) || 2;
-        lightTriggerRow.selected = lightTriggerIndex;
-
-        // --- Specific Light Time Entry ---
-        const customLightTimeRow = new Adw.ActionRow({
-            title: 'Specific Light Time (24-hour)',
-        });
-        const customLightTimeEntry = new Gtk.Entry({
-            text: this.settings.get_string('custom-light-time'),
-            valign: Gtk.Align.CENTER,
-        });
-        customLightTimeRow.add_suffix(customLightTimeEntry);
-        lightTriggerGroup.add(customLightTimeRow);
-
-        // Function to update visibility based on auto-detect and manual coordinates settings
-        const updateLightTriggerVisibility = () => {
-            const autoDetectEnabled = this.settings.get_boolean('auto-detect-location');
-            const useManualCoords = this.settings.get_boolean('use-manual-coordinates');
-
-            // Show triggers if auto-detect OR manual coordinates is enabled
-            const showTriggers = autoDetectEnabled || useManualCoords;
-
-            if (showTriggers) {
-                // Show dropdown with all options
-                lightTriggerRow.visible = true;
-                // Show time entry only if 'Specific Time' is selected
-                customLightTimeRow.visible = lightTriggerRow.selected === 3;
-            } else {
-                // Hide dropdown, only show time entry
-                lightTriggerRow.visible = false;
-                customLightTimeRow.visible = true;
-            }
-        };
-
-        // Initial visibility
-        updateLightTriggerVisibility();
-
-        // Update visibility when settings change
-        this.settings.connect('changed::auto-detect-location', updateLightTriggerVisibility);
-        this.settings.connect('changed::use-manual-coordinates', updateLightTriggerVisibility);
-
-        // Show/hide specific light time row based on trigger selection (when auto-detect is on)
-        lightTriggerRow.connect('notify::selected', () => {
-            if (this.settings.get_boolean('auto-detect-location')) {
-                customLightTimeRow.visible = lightTriggerRow.selected === 3;
-            }
-        });
-
-        // --- Dark Mode Trigger Settings ---
-        const darkTriggerGroup = new Adw.PreferencesGroup({ title: 'Dark Mode Trigger' });
-        page.add(darkTriggerGroup);
-
-        const darkTriggerRow = new Adw.ComboRow({
-            title: 'Switch to Dark Mode at...',
-        });
-        const darkTriggerModel = new Gtk.StringList();
-        darkTriggerModel.append('Solar Noon');
-        darkTriggerModel.append('Golden Hour');
-        darkTriggerModel.append('Sunset');
-        darkTriggerModel.append('Dusk');
-        darkTriggerModel.append('Last Light');
-        darkTriggerModel.append('Specific Time');
-        darkTriggerRow.model = darkTriggerModel;
-        darkTriggerGroup.add(darkTriggerRow);
-
-        const darkTriggerMap = { 0: 'solar-noon', 1: 'golden-hour', 2: 'sunset', 3: 'dusk', 4: 'last-light', 5: 'custom' };
-        const savedDarkTrigger = this.settings.get_string('dark-mode-trigger');
-        const darkTriggerIndex = Object.keys(darkTriggerMap).find(key => darkTriggerMap[key] === savedDarkTrigger) || 0;
-        darkTriggerRow.selected = darkTriggerIndex;
-
-        // --- Specific Dark Time Entry ---
-        const customDarkTimeRow = new Adw.ActionRow({
-            title: 'Specific Dark Time (24-hour)',
-        });
-        const customDarkTimeEntry = new Gtk.Entry({
-            text: this.settings.get_string('custom-dark-time'),
-            valign: Gtk.Align.CENTER,
-        });
-        customDarkTimeRow.add_suffix(customDarkTimeEntry);
-        darkTriggerGroup.add(customDarkTimeRow);
-
-        // Function to update visibility based on auto-detect and manual coordinates settings
-        const updateDarkTriggerVisibility = () => {
-            const autoDetectEnabled = this.settings.get_boolean('auto-detect-location');
-            const useManualCoords = this.settings.get_boolean('use-manual-coordinates');
-
-            // Show triggers if auto-detect OR manual coordinates is enabled
-            const showTriggers = autoDetectEnabled || useManualCoords;
-
-            if (showTriggers) {
-                // Show dropdown with all options
-                darkTriggerRow.visible = true;
-                // Show time entry only if 'Specific Time' is selected
-                customDarkTimeRow.visible = darkTriggerRow.selected === 3;
-            } else {
-                // Hide dropdown, only show time entry
-                darkTriggerRow.visible = false;
-                customDarkTimeRow.visible = true;
-            }
-        };
-
-        // Initial visibility
-        updateDarkTriggerVisibility();
-
-        // Update visibility when settings change
-        this.settings.connect('changed::auto-detect-location', updateDarkTriggerVisibility);
-        this.settings.connect('changed::use-manual-coordinates', updateDarkTriggerVisibility);
-
-        // Show/hide specific dark time row based on trigger selection (when auto-detect is on)
-        darkTriggerRow.connect('notify::selected', () => {
-            if (this.settings.get_boolean('auto-detect-location')) {
-                customDarkTimeRow.visible = darkTriggerRow.selected === 3;
-            }
-        });
 
         // --- Bind settings to UI widgets ---
         // Load saved theme selections
@@ -856,10 +845,8 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             lightBrightnessRow.add_controller(lightGesture);
 
             lightGesture.connect('pressed', () => {
-                console.log('Light slider: PRESSED event');
                 isLightGrabbed = true;
                 originalBrightness = getCurrentBrightness();
-                console.log(`Light slider: Stored original brightness: ${originalBrightness}`);
 
                 // Show preview toast
                 const toast = new Adw.Toast({
@@ -871,13 +858,11 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             });
 
             lightGesture.connect('released', () => {
-                console.log('Light slider: RELEASED event');
                 isLightGrabbed = false;
 
                 // Save the final value
                 const finalValue = Math.round(lightBrightnessAdjustment.get_value());
                 this.settings.set_int('light-brightness', finalValue);
-                console.log(`Light slider: Saved final value: ${finalValue}`);
 
                 // Dismiss preview toast
                 if (currentPreviewToast) {
@@ -887,7 +872,6 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
 
                 // Restore original brightness
                 if (originalBrightness !== null) {
-                    console.log(`Light slider: Restoring to: ${originalBrightness}`);
                     setBrightness(originalBrightness);
                     originalBrightness = null;
 
@@ -1197,20 +1181,60 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         // Initial update
         this._updateDebugInfo();
 
+        // Store signal handler IDs for cleanup
+        this._settingsSignalIds = [];
+
+        // Track settings signal connections for cleanup
+        const trackSignal = (signalId) => {
+            this._settingsSignalIds.push(signalId);
+            return signalId;
+        };
+
+        // Update the existing settings.connect calls to track signal IDs
+        // (Note: These were connected earlier in the code but not tracked)
+        // We'll disconnect them in the close-request handler below
+
         // Clean up timers and references when window closes for proper garbage collection
         window.connect('close-request', () => {
-            if (this._timeUpdateId) {
-                GLib.source_remove(this._timeUpdateId);
-                this._timeUpdateId = null;
+            // Clean up time update timer
+            try {
+                if (this._timeUpdateId) {
+                    GLib.source_remove(this._timeUpdateId);
+                    this._timeUpdateId = null;
+                }
+            } catch (e) {
+                console.error(`Failed to remove time update timer: ${e}`);
             }
-            if (this._debugRefreshId) {
-                GLib.source_remove(this._debugRefreshId);
-                this._debugRefreshId = null;
+
+            // Clean up debug refresh timer
+            try {
+                if (this._debugRefreshId) {
+                    GLib.source_remove(this._debugRefreshId);
+                    this._debugRefreshId = null;
+                }
+            } catch (e) {
+                console.error(`Failed to remove debug refresh timer: ${e}`);
             }
+
+            // Disconnect all settings signal handlers
+            // Note: GSettings signal handlers should be disconnected, but they're created
+            // throughout the code without tracking. While not critical for prefs (which
+            // is short-lived), it's good practice to clean up properly.
+            // For now, we'll just null out the settings reference.
+            try {
+                this.settings = null;
+            } catch (e) {
+                console.error(`Failed to null settings: ${e}`);
+            }
+
             // Clear widget references to allow garbage collection
-            this._debugLabels = null;
-            this._nextEventTimestamp = null;
-            this.settings = null;
+            try {
+                this._debugLabels = null;
+                this._nextEventTimestamp = null;
+            } catch (e) {
+                console.error(`Failed to clear widget references: ${e}`);
+            }
+
             return false;
         });
     }
@@ -1361,7 +1385,6 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
                     const darkBrightness = this.settings.get_int('dark-brightness');
 
                     if (lightBrightness === 100 && darkBrightness === 50) {
-                        console.log(`Setting brightness sliders to current: ${currentPercent}%`);
                         lightScale.set_value(currentPercent);
                         darkScale.set_value(currentPercent);
                         this.settings.set_int('light-brightness', currentPercent);
