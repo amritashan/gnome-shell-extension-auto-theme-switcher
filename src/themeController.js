@@ -1,0 +1,86 @@
+import Gio from 'gi://Gio';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+
+export class ThemeController {
+    constructor(settings) {
+        this._settings = settings;
+        this._interfaceSettings = new Gio.Settings({ schema_id: 'org.gnome.desktop.interface' });
+        this._colorSettings = new Gio.Settings({ schema_id: 'org.gnome.settings-daemon.plugins.color' });
+    }
+
+    switchTheme(isDark, showNotification = true, manualModeActive = false) {
+        const theme = isDark ? this._settings.get_string('dark-theme') : this._settings.get_string('light-theme');
+        const colorScheme = isDark ? 'prefer-dark' : 'prefer-light';
+
+        const currentTheme = this._interfaceSettings.get_string('gtk-theme');
+        const currentColorScheme = this._interfaceSettings.get_string('color-scheme');
+
+        const themeAlreadySet = (currentTheme === theme && currentColorScheme === colorScheme);
+
+        if (themeAlreadySet) {
+            console.log(`ThemeSwitcher: Theme already set to ${isDark ? 'Dark' : 'Light'} (${theme}), no change needed`);
+            return;
+        }
+
+        this._interfaceSettings.set_string('gtk-theme', theme);
+        this._interfaceSettings.set_string('color-scheme', colorScheme);
+
+        const nightLightMode = this._settings.get_string('night-light-mode');
+        if (nightLightMode === 'sync-with-theme') {
+            this._colorSettings.set_boolean('night-light-enabled', isDark);
+            console.log(`ThemeSwitcher: Night Light ${isDark ? 'enabled' : 'disabled'} (synced with theme)`);
+        } else if (nightLightMode === 'custom-schedule') {
+            this.updateNightLightSchedule();
+        }
+
+        console.log(`ThemeSwitcher: Switched to ${isDark ? 'Dark' : 'Light'} theme (${theme}), Night Light mode: ${nightLightMode}`);
+
+        if (showNotification && !manualModeActive && this._settings.get_boolean('show-notifications')) {
+            const title = 'Auto Theme Switcher';
+            const body = `Switched to ${isDark ? 'dark' : 'light'} mode`;
+            const icon = isDark ? 'weather-clear-night-symbolic' : 'weather-clear-symbolic';
+
+            Main.notify(title, body, icon);
+        }
+    }
+
+    updateNightLightSchedule() {
+        const startTime = this._settings.get_string('night-light-start-time');
+        const endTime = this._settings.get_string('night-light-end-time');
+
+        const [startH, startM] = startTime.split(':').map(Number);
+        const [endH, endM] = endTime.split(':').map(Number);
+
+        if (!isNaN(startH) && !isNaN(startM) && !isNaN(endH) && !isNaN(endM)) {
+            const startFractional = startH + startM / 60;
+            const endFractional = endH + endM / 60;
+
+            this._colorSettings.set_boolean('night-light-enabled', true);
+            this._colorSettings.set_boolean('night-light-schedule-automatic', false);
+            this._colorSettings.set_double('night-light-schedule-from', startFractional);
+            this._colorSettings.set_double('night-light-schedule-to', endFractional);
+
+            console.log(`ThemeSwitcher: Night Light custom schedule set: ${startTime} to ${endTime}`);
+        } else {
+            console.error('ThemeSwitcher: Invalid Night Light schedule times');
+        }
+    }
+
+    initializeDefaultThemes() {
+        const lightTheme = this._settings.get_string('light-theme');
+        const darkTheme = this._settings.get_string('dark-theme');
+        const currentTheme = this._interfaceSettings.get_string('gtk-theme');
+
+        if (lightTheme === 'Adwaita' && darkTheme === 'Adwaita-dark') {
+            this._settings.set_string('light-theme', currentTheme);
+            this._settings.set_string('dark-theme', currentTheme);
+        }
+    }
+
+    cleanup() {
+        // Clear all GSettings references to prevent memory leaks
+        this._settings = null;
+        this._interfaceSettings = null;
+        this._colorSettings = null;
+    }
+}
