@@ -14,7 +14,6 @@ import { TimeCalculator } from './timeCalculator.js';
 
 export class ExtensionController {
     constructor(extension) {
-        console.log(`ThemeSwitcher: ExtensionController constructor called`);
         this._extension = extension;
         this._settings = extension.getSettings();
         this._scheduleTimeoutId = null;
@@ -34,11 +33,9 @@ export class ExtensionController {
         this._themeController = new ThemeController(this._settings);
         this._apiClient = new APIClient();
         this._timeCalculator = new TimeCalculator();
-        console.log(`ThemeSwitcher: ExtensionController constructed successfully`);
     }
 
     enable() {
-        console.log(`ThemeSwitcher: ExtensionController.enable() called`);
         // Initialize default themes from current system theme on first run
         this._themeController.initializeDefaultThemes();
 
@@ -54,7 +51,6 @@ export class ExtensionController {
         // Run the main logic loop (async, but we don't await to avoid blocking enable())
         this._scheduleNextChangeEvent(true).catch(e => {
             console.error(`ThemeSwitcher: Error in initial scheduling: ${e}`);
-            console.error(`ThemeSwitcher: Stack trace:`, e.stack);
         });
     }
 
@@ -93,15 +89,6 @@ export class ExtensionController {
     }
 
     _setupLockUnlockDetection() {
-        // JUSTIFICATION FOR unlock-dialog SESSION MODE:
-        // This extension includes "unlock-dialog" in session-modes to remain active during screen lock.
-        // This is necessary to:
-        // 1. Detect unlock events via Main.sessionMode transitions (user <-> unlock-dialog)
-        // 2. Apply brightness adjustments ONLY when within a gradual transition window on unlock
-        // 3. Avoid adjusting brightness on every unlock (which would be disruptive)
-        // Without unlock-dialog mode, the extension would be disabled during lock and re-enabled
-        // on unlock, causing enable() to run and always adjust brightness (undesired behavior).
-        // This extension does NOT connect to any keyboard events in unlock-dialog mode.
         this._setupSessionModeHandler();
         this._setupScreenSaverHandler().catch(e => {
             console.error(`ThemeSwitcher: Error setting up screen saver handler: ${e}`);
@@ -184,11 +171,6 @@ export class ExtensionController {
     }
 
     disable() {
-        // JUSTIFICATION FOR SESSION MODE CLEANUP:
-        // This extension uses "unlock-dialog" session mode to remain active during screen lock.
-        // We must properly disconnect from session mode signals and clean up all resources
-        // to prevent memory leaks and ensure the extension can be cleanly re-enabled.
-
         // Clean up all timers
         if (this._scheduleTimeoutId) {
             GLib.source_remove(this._scheduleTimeoutId);
@@ -289,9 +271,7 @@ export class ExtensionController {
 
         if (autoDetectLocation) {
             apiData = await this._apiClient.getApiData();
-            console.log(`ThemeSwitcher: API data received:`, apiData ? 'success' : 'failed');
             if (!apiData || !apiData.results) {
-                console.error(`ThemeSwitcher: API call failed or no results`);
                 this._apiRetryTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, API_REFRESH_INTERVAL_SECONDS, () => {
                     this._scheduleNextChangeEvent();
                     return GLib.SOURCE_REMOVE;
@@ -301,11 +281,9 @@ export class ExtensionController {
 
             lightModeTrigger = this._settings.get_string('light-mode-trigger');
             lightTime = this._timeCalculator.parseTriggerTime(lightModeTrigger, apiData.results, now, 'light', this._settings);
-            console.log(`ThemeSwitcher: Parsed light time (${lightModeTrigger}):`, lightTime);
 
             darkModeTrigger = this._settings.get_string('dark-mode-trigger');
             darkTime = this._timeCalculator.parseTriggerTime(darkModeTrigger, apiData.results, now, 'dark', this._settings);
-            console.log(`ThemeSwitcher: Parsed dark time (${darkModeTrigger}):`, darkTime);
         } else if (useManualCoordinates) {
             const latitude = this._settings.get_string('manual-latitude');
             const longitude = this._settings.get_string('manual-longitude');
@@ -335,7 +313,6 @@ export class ExtensionController {
         }
 
         if (!lightTime || !darkTime) {
-            console.error(`ThemeSwitcher: Failed to calculate times - lightTime: ${lightTime}, darkTime: ${darkTime}`);
             this._apiRetryTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, API_REFRESH_INTERVAL_SECONDS, () => {
                 this._scheduleNextChangeEvent();
                 return GLib.SOURCE_REMOVE;
