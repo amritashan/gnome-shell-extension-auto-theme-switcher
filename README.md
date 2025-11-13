@@ -53,6 +53,54 @@ Visit [extensions.gnome.org](https://extensions.gnome.org/) and search for "Auto
 - Location names from OpenStreetMap Nominatim
 - No personal data is stored or transmitted beyond these API calls
 
+## Development
+
+### Project Structure
+
+```
+src/                    # Source files
+  ├── extension.js      # Extension entry point (minimal)
+  ├── extensionController.js  # Main extension logic
+  ├── apiClient.js      # API client for fetching sun times
+  ├── themeController.js      # Theme switching logic
+  ├── brightnessController.js # Brightness control logic
+  ├── timeCalculator.js       # Time calculation utilities
+  ├── prefs.js          # Preferences UI
+  ├── metadata.json     # Extension metadata
+  └── schemas/          # GSettings schemas
+
+build/                  # Build output (generated)
+  └── ...               # All files from src/ copied here
+```
+
+### Development Workflow
+
+**For local development/testing:**
+```bash
+./deploy.sh
+```
+This script:
+- Copies all files directly from `src/` to the installation directory
+- Compiles schemas
+- Reloads the extension automatically
+- Works on both X11 and Wayland
+
+**For packaging (e.g., for extensions.gnome.org):**
+```bash
+./package.sh          # Build and create zip package
+# or
+./package.sh build    # Only build (copy src/ to build/)
+```
+
+The build process automatically copies **all files** from `src/` to `build/`, so you never need to manually specify which files to copy. When you add new files to `src/`, they'll automatically be included in the next build.
+
+### Making Changes
+
+1. Edit files in `src/` directory
+2. Run `./deploy.sh` to test locally
+3. Test the changes
+4. When ready to package: `./package.sh`
+
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request on GitHub.

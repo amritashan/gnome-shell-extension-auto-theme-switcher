@@ -6,13 +6,20 @@ export class APIClient {
         this.latitude = null;
         this.longitude = null;
         this.locationName = null;
+        this._session = new Soup.Session();
+    }
+
+    destroy() {
+        if (this._session) {
+            this._session.abort();
+            this._session = null;
+        }
     }
 
     async getApiData() {
         try {
-            const session = new Soup.Session();
             const locationMessage = Soup.Message.new('GET', 'https://ipinfo.io/loc');
-            const locationBytes = await session.send_and_read_async(
+            const locationBytes = await this._session.send_and_read_async(
                 locationMessage,
                 GLib.PRIORITY_DEFAULT,
                 null
@@ -27,7 +34,7 @@ export class APIClient {
 
             const url = `https://api.sunrisesunset.io/json?lat=${latitude}&lng=${longitude}`;
             const apiMessage = Soup.Message.new('GET', url);
-            const apiBytes = await session.send_and_read_async(
+            const apiBytes = await this._session.send_and_read_async(
                 apiMessage,
                 GLib.PRIORITY_DEFAULT,
                 null
@@ -38,7 +45,7 @@ export class APIClient {
                 const geoUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`;
                 const geoMessage = Soup.Message.new('GET', geoUrl);
                 geoMessage.request_headers.append('User-Agent', 'GNOME-Auto-Theme-Switcher/1.0');
-                const geoBytes = await session.send_and_read_async(
+                const geoBytes = await this._session.send_and_read_async(
                     geoMessage,
                     GLib.PRIORITY_DEFAULT,
                     null
@@ -73,14 +80,12 @@ export class APIClient {
     async getApiDataForCoordinates(latitude, longitude) {
         try {
             console.log(`ThemeSwitcher: Fetching sun times for manual coordinates: ${latitude}, ${longitude}`);
-            const session = new Soup.Session();
-
             this.latitude = latitude;
             this.longitude = longitude;
 
             const url = `https://api.sunrisesunset.io/json?lat=${latitude}&lng=${longitude}`;
             const apiMessage = Soup.Message.new('GET', url);
-            const apiBytes = await session.send_and_read_async(
+            const apiBytes = await this._session.send_and_read_async(
                 apiMessage,
                 GLib.PRIORITY_DEFAULT,
                 null
@@ -91,7 +96,7 @@ export class APIClient {
                 const geoUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`;
                 const geoMessage = Soup.Message.new('GET', geoUrl);
                 geoMessage.request_headers.append('User-Agent', 'GNOME-Auto-Theme-Switcher/1.0');
-                const geoBytes = await session.send_and_read_async(
+                const geoBytes = await this._session.send_and_read_async(
                     geoMessage,
                     GLib.PRIORITY_DEFAULT,
                     null
