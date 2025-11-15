@@ -10,10 +10,22 @@ export class ThemeController {
 
     switchTheme(isDark, showNotification = true, manualModeActive = false) {
         const theme = isDark ? this._settings.get_string('dark-theme') : this._settings.get_string('light-theme');
-        const colorScheme = isDark ? 'prefer-dark' : 'prefer-light';
+        const trueLightMode = this._settings.get_boolean('true-light-mode');
 
         const currentTheme = this._interfaceSettings.get_string('gtk-theme');
         const currentColorScheme = this._interfaceSettings.get_string('color-scheme');
+
+        // Determine target color-scheme based on True Light Mode setting
+        let colorScheme;
+        let shouldChangeColorScheme = true;
+
+        if (trueLightMode) {
+            // True Light Mode enabled: change color-scheme fully (light apps + light shell)
+            colorScheme = isDark ? 'prefer-dark' : 'prefer-light';
+        } else {
+            // True Light Mode disabled: use 'default' for light mode (light apps + dark shell)
+            colorScheme = isDark ? 'prefer-dark' : 'default';
+        }
 
         const themeAlreadySet = (currentTheme === theme && currentColorScheme === colorScheme);
 
@@ -33,7 +45,7 @@ export class ThemeController {
             this.updateNightLightSchedule();
         }
 
-        console.log(`ThemeSwitcher: Switched to ${isDark ? 'Dark' : 'Light'} theme (${theme}), Night Light mode: ${nightLightMode}`);
+        console.log(`ThemeSwitcher: Switched to ${isDark ? 'Dark' : 'Light'} theme (${theme}), color-scheme: ${colorScheme}, True Light Mode: ${trueLightMode ? 'enabled' : 'disabled'}`);
 
         if (showNotification && !manualModeActive && this._settings.get_boolean('show-notifications')) {
             const title = 'Auto Theme Switcher';
@@ -64,6 +76,11 @@ export class ThemeController {
         } else {
             console.error('ThemeSwitcher: Invalid Night Light schedule times');
         }
+    }
+
+    isCurrentlyInLightMode() {
+        const currentColorScheme = this._interfaceSettings.get_string('color-scheme');
+        return currentColorScheme !== 'prefer-dark';
     }
 
     initializeDefaultThemes() {

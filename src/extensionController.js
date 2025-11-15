@@ -86,6 +86,14 @@ export class ExtensionController {
         this._darkBrightnessChangedId = this._settings.connect('changed::dark-brightness', () => {
             this._brightnessController.updateBrightness();
         });
+
+        this._trueLightModeChangedId = this._settings.connect('changed::true-light-mode', () => {
+            // When true-light-mode setting changes, immediately re-apply theme if currently in light mode
+            // This provides instant visual feedback when toggling the setting
+            if (this._themeController.isCurrentlyInLightMode()) {
+                this._themeController.switchTheme(false, false, this._manualModeActive);
+            }
+        });
     }
 
     _setupLockUnlockDetection() {
@@ -217,6 +225,7 @@ export class ExtensionController {
             '_controlBrightnessChangedId',
             '_lightBrightnessChangedId',
             '_darkBrightnessChangedId',
+            '_trueLightModeChangedId',
         ];
 
         for (const signalId of settingsSignals) {

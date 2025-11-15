@@ -77,6 +77,12 @@
       <summary>The GTK theme to use at night.</summary>
     </key>
 
+    <key name="true-light-mode" type="b">
+      <default>false</default>
+      <summary>Enable True Light Mode - makes the top bar/shell light in addition to GTK apps.</summary>
+      <description>When enabled, switches the system color-scheme preference to make the GNOME Shell top bar light. When disabled, only GTK themes are switched while keeping the shell/top bar dark. Note: This option only affects systems using stock GNOME (like Fedora). Ubuntu keeps the top bar dark by default regardless of this setting.</description>
+    </key>
+
     <key name="night-light-mode" type="s">
       <default>'disabled'</default>
       <summary>Night Light control mode ('disabled', 'sync-with-theme', or 'custom-schedule').</summary>

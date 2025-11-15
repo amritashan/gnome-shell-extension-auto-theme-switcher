@@ -146,6 +146,19 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         darkThemeRow.model = darkThemeModel;
         group.add(darkThemeRow);
 
+        // --- True Light Mode Toggle ---
+        const trueLightModeRow = new Adw.ActionRow({
+            title: 'True Light Mode',
+            subtitle: 'Also change the Shell/top bar color when switching themes (may not work with Ubuntu)',
+        });
+        const trueLightModeToggle = new Gtk.Switch({
+            active: this.settings.get_boolean('true-light-mode'),
+            valign: Gtk.Align.CENTER,
+        });
+        trueLightModeRow.add_suffix(trueLightModeToggle);
+        trueLightModeRow.activatable_widget = trueLightModeToggle;
+        group.add(trueLightModeRow);
+
         // --- Night Light Options ---
         const nightLightGroup = new Adw.PreferencesGroup({ title: 'Night Light Control' });
         page.add(nightLightGroup);
@@ -758,6 +771,7 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         this.settings.bind('use-manual-coordinates', manualCoordinatesToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
         this.settings.bind('manual-latitude', latitudeEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
         this.settings.bind('manual-longitude', longitudeEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
+        this.settings.bind('true-light-mode', trueLightModeToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
         this.settings.bind('show-notifications', notificationsToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
         this.settings.bind('custom-light-time', customLightTimeEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
         this.settings.bind('custom-dark-time', customDarkTimeEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
