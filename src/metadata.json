@@ -1,6 +1,6 @@
 {
     "name": "Automatic Theme Switcher",
-    "description": "Automatically switches between light and dark themes based on sunrise/sunset times for your location.\nSupports multiple trigger options (golden hour, dawn, dusk, etc.), gradual brightness transitions, and syncs with Night Light.\n\nUses ipinfo.io, sunrisesunset.io, and openstreetmap.org services.\n\nIf you find any bugs/issues, feel free to create an issue at https://github.com/amritashan/gnome-shell-extension-auto-theme-switcher/issues",
+    "description": "Automatically switches between light and dark themes based on sunrise/sunset times for your location.\nSupports multiple trigger options (golden hour, dawn, dusk, etc.), gradual brightness transitions, and syncs with Night Light.\n\nUses ipinfo.io and openstreetmap.org services for location detection.\n\nIf you find any bugs/issues, feel free to create an issue at https://github.com/amritashan/gnome-shell-extension-auto-theme-switcher/issues",
     "uuid": "auto-theme-switcher@amritashan.github.io",
     "shell-version": ["45", "46", "47", "48", "49"],
     "version": 6,
