@@ -1,65 +1,97 @@
+/**
+ * TimeCalculator - Handles time parsing and trigger resolution
+ *
+ * Works with both local solar calculations (Date objects from suncalc)
+ * and custom time strings (HH:MM format).
+ */
+
 export class TimeCalculator {
-    parseTime(timeStr) {
-        // Creates a Date object for a time string like "5:44:30 AM"
-        const now = new Date();
-        const [time, period] = timeStr.split(' ');
-        let [hours, minutes, seconds] = time.split(':').map(Number);
-
-        if (period === 'PM' && hours < 12) {
-            hours += 12;
-        }
-        if (period === 'AM' && hours === 12) {
-            hours = 0;
-        }
-        return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, seconds);
-    }
-
-    parseTriggerTime(trigger, apiResults, now, mode, settings) {
+    /**
+     * Parse a trigger setting and return the corresponding time
+     *
+     * @param {string} trigger - The trigger type ('sunrise', 'sunset', 'custom', etc.)
+     * @param {Object} solarTimes - Solar times from SolarCalculator (Date objects)
+     * @param {Date} now - Current date/time
+     * @param {string} mode - 'light' or 'dark'
+     * @param {Object} settings - GSettings object
+     * @returns {Date|null} The resolved time or null if invalid
+     */
+    parseTriggerTime(trigger, solarTimes, now, mode, settings) {
         if (trigger === 'custom') {
             const customTimeSetting = mode === 'light' ? 'custom-light-time' : 'custom-dark-time';
             const customTime = settings.get_string(customTimeSetting);
             return this.parseCustomTime(customTime, now);
         }
 
-        let apiField;
-        if (trigger === 'first-light') {
-            apiField = 'first_light';
-        } else if (trigger === 'dawn') {
-            apiField = 'dawn';
-        } else if (trigger === 'sunrise') {
-            apiField = 'sunrise';
-        } else if (trigger === 'solar-noon') {
-            apiField = 'solar_noon';
-        } else if (trigger === 'golden-hour') {
-            apiField = 'golden_hour';
-        } else if (trigger === 'sunset') {
-            apiField = 'sunset';
-        } else if (trigger === 'dusk') {
-            apiField = 'dusk';
-        } else if (trigger === 'last-light') {
-            apiField = 'last_light';
-        } else {
-            console.error(`ThemeSwitcher: Unknown trigger '${trigger}', using default`);
-            apiField = mode === 'light' ? 'sunrise' : 'sunset';
+        // Map trigger names to solarTimes properties
+        // solarTimes from SolarCalculator contains Date objects directly
+        const triggerMap = {
+            // Morning events (chronological order)
+            'first-light': 'first_light',       // Astronomical dawn (-18°)
+            'nautical-dawn': 'nautical_dawn',   // Nautical dawn (-12°)
+            'dawn': 'dawn',                     // Civil dawn (-6°)
+            'sunrise': 'sunrise',               // Sunrise (-0.833°)
+            'sunrise-end': 'sunrise_end',       // Sun fully visible (-0.3°)
+            'golden-hour-end': 'golden_hour_end', // Morning golden hour ends (6°)
+
+            // Midday
+            'solar-noon': 'solar_noon',
+
+            // Evening events (chronological order)
+            'golden-hour': 'golden_hour',       // Evening golden hour starts (6°)
+            'sunset-start': 'sunset_start',     // Sun begins to set (-0.3°)
+            'sunset': 'sunset',                 // Sunset (-0.833°)
+            'dusk': 'dusk',                     // Civil dusk (-6°)
+            'nautical-dusk': 'nautical_dusk',   // Nautical dusk (-12°)
+            'last-light': 'last_light',         // Astronomical dusk (-18°)
+        };
+
+        const solarTimeKey = triggerMap[trigger];
+
+        if (!solarTimeKey) {
+            console.error(`TimeCalculator: Unknown trigger '${trigger}', using default`);
+            const defaultKey = mode === 'light' ? 'sunrise' : 'sunset';
+            return solarTimes[defaultKey] || null;
         }
 
-        return this.parseTime(apiResults[apiField]);
-    }
+        const time = solarTimes[solarTimeKey];
 
-    parseCustomTime(timeString, now) {
-        const timeParts = timeString.split(':');
-        if (timeParts.length >= 2) {
-            const h = parseInt(timeParts[0], 10);
-            const m = parseInt(timeParts[1], 10);
-            if (!isNaN(h) && !isNaN(m) && h >= 0 && h < 24 && m >= 0 && m < 60) {
-                return new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);
-            } else {
-                console.error(`ThemeSwitcher: Invalid custom time format: ${timeString}`);
-                return null;
-            }
-        } else {
-            console.error(`ThemeSwitcher: Invalid custom time format: ${timeString}`);
+        if (!time || !(time instanceof Date) || isNaN(time.getTime())) {
+            console.warn(`TimeCalculator: Invalid or missing time for trigger '${trigger}'`);
             return null;
         }
+
+        return time;
+    }
+
+    /**
+     * Parse a custom time string (HH:MM format) into a Date object for today
+     *
+     * @param {string} timeString - Time in HH:MM format (e.g., "07:00")
+     * @param {Date} now - Current date/time (used to get today's date)
+     * @returns {Date|null} Date object for today at the specified time, or null if invalid
+     */
+    parseCustomTime(timeString, now) {
+        if (!timeString) {
+            console.error('TimeCalculator: Empty time string provided');
+            return null;
+        }
+
+        const timeParts = timeString.split(':');
+
+        if (timeParts.length < 2) {
+            console.error(`TimeCalculator: Invalid custom time format: ${timeString}`);
+            return null;
+        }
+
+        const h = parseInt(timeParts[0], 10);
+        const m = parseInt(timeParts[1], 10);
+
+        if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+            console.error(`TimeCalculator: Invalid custom time values: ${timeString}`);
+            return null;
+        }
+
+        return new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);
     }
 }

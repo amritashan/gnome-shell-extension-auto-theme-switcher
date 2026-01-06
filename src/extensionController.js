@@ -2,14 +2,13 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {
-    API_REFRESH_INTERVAL_SECONDS,
     RESUME_DELAY_SECONDS,
     MS_PER_SECOND,
     MS_PER_DAY
 } from './constants.js';
 import { BrightnessController } from './brightnessController.js';
 import { ThemeController } from './themeController.js';
-import { APIClient } from './apiClient.js';
+import { SolarCalculator } from './solarCalculator.js';
 import { TimeCalculator } from './timeCalculator.js';
 
 export class ExtensionController {
@@ -17,7 +16,6 @@ export class ExtensionController {
         this._extension = extension;
         this._settings = extension.getSettings();
         this._scheduleTimeoutId = null;
-        this._apiRetryTimeoutId = null;
         this._resumeTimeoutId = null;
         this._debugInfo = null;
         this._manualModeActive = false;
@@ -31,7 +29,7 @@ export class ExtensionController {
         // Initialize controllers and helpers
         this._brightnessController = new BrightnessController(this._settings);
         this._themeController = new ThemeController(this._settings);
-        this._apiClient = new APIClient();
+        this._solarCalculator = new SolarCalculator();
         this._timeCalculator = new TimeCalculator();
     }
 
@@ -48,20 +46,40 @@ export class ExtensionController {
         // Listen for settings changes that require re-scheduling
         this._setupSettingsListeners();
 
-        // Run the main logic loop (async, but we don't await to avoid blocking enable())
-        this._scheduleNextChangeEvent(true).catch(e => {
-            console.error(`ThemeSwitcher: Error in initial scheduling: ${e}`);
-        });
+        // Check for pending migration notifications
+        this._showMigrationNotificationIfPending();
+
+        // Run the main logic loop
+        this._scheduleNextChangeEvent(true);
+    }
+
+    /**
+     * Check for pending migration notifications and show them.
+     * The MigrationManager sets a flag when migrations complete that require user attention.
+     * @private
+     */
+    _showMigrationNotificationIfPending() {
+        const pendingNotification = this._settings.get_string('migration-notification-pending');
+
+        if (pendingNotification === 'v0-to-v1') {
+            // Show notification about location detection changes
+            Main.notify(
+                'Auto Theme Switcher Updated',
+                'Location setting has changed. Please set your location in the extension preferences to enable solar-based theme switching.'
+            );
+
+            // Clear the pending notification
+            this._settings.set_string('migration-notification-pending', '');
+            console.log('ExtensionController: Showed v0-to-v1 migration notification');
+        }
     }
 
     _setupSettingsListeners() {
         const scheduleSettings = [
-            'auto-detect-location',
             'light-mode-trigger',
             'dark-mode-trigger',
             'custom-light-time',
             'custom-dark-time',
-            'use-manual-coordinates',
             'manual-latitude',
             'manual-longitude',
         ];
@@ -79,13 +97,8 @@ export class ExtensionController {
             this._brightnessController.scheduleBrightnessUpdates();
         });
 
-        this._lightBrightnessChangedId = this._settings.connect('changed::light-brightness', () => {
-            this._brightnessController.updateBrightness();
-        });
-
-        this._darkBrightnessChangedId = this._settings.connect('changed::dark-brightness', () => {
-            this._brightnessController.updateBrightness();
-        });
+        // Note: We don't watch 'changed::monitors' to avoid race conditions with preview/restore
+        // in the preferences dialog. Brightness changes are applied during theme transitions only.
 
         this._trueLightModeChangedId = this._settings.connect('changed::true-light-mode', () => {
             // When true-light-mode setting changes, immediately re-apply theme if currently in light mode
@@ -109,7 +122,10 @@ export class ExtensionController {
             const parentMode = Main.sessionMode.parentMode;
 
             if (currentMode === 'user' || parentMode === 'user') {
-                this._brightnessController.updateBrightness(false);
+                // Fire-and-forget async brightness update
+                this._brightnessController.updateBrightness(false).catch(e => {
+                    console.error('ExtensionController: Failed to update brightness on session mode change:', e);
+                });
             }
         });
     }
@@ -127,7 +143,10 @@ export class ExtensionController {
 
         this._screenSaverSignalId = this._screenSaverProxy.connectSignal('ActiveChanged', (_proxy, _sender, [isActive]) => {
             if (!isActive) {
-                this._brightnessController.updateBrightness(false);
+                // Fire-and-forget async brightness update
+                this._brightnessController.updateBrightness(false).catch(e => {
+                    console.error('ExtensionController: Failed to update brightness after screen unlock:', e);
+                });
             }
         });
     }
@@ -147,9 +166,9 @@ export class ExtensionController {
                         GLib.source_remove(this._resumeTimeoutId);
                         this._resumeTimeoutId = null;
                     }
-                    this._resumeTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RESUME_DELAY_SECONDS, async () => {
+                    this._resumeTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RESUME_DELAY_SECONDS, () => {
                         if (!this._manualModeActive) {
-                            await this._scheduleNextChangeEvent();
+                            this._scheduleNextChangeEvent();
                         }
                         this._resumeTimeoutId = null;
                         return GLib.SOURCE_REMOVE;
@@ -160,11 +179,8 @@ export class ExtensionController {
     }
 
     getDebugInfo() {
-        const now = new Date();
-        const lightTrigger = this._settings.get_string('light-mode-trigger');
-        const darkTrigger = this._settings.get_string('dark-mode-trigger');
-
-        this._storeDebugInfo(now, this._lightTime, this._darkTime, lightTrigger, darkTrigger, null);
+        // Return the existing debug info without overwriting it
+        // The debug info is populated by _scheduleNextChangeEvent() with correct solar times
         return JSON.stringify(this._debugInfo || {});
     }
 
@@ -183,10 +199,6 @@ export class ExtensionController {
         if (this._scheduleTimeoutId) {
             GLib.source_remove(this._scheduleTimeoutId);
             this._scheduleTimeoutId = null;
-        }
-        if (this._apiRetryTimeoutId) {
-            GLib.source_remove(this._apiRetryTimeoutId);
-            this._apiRetryTimeoutId = null;
         }
         if (this._resumeTimeoutId) {
             GLib.source_remove(this._resumeTimeoutId);
@@ -214,17 +226,13 @@ export class ExtensionController {
 
         // Disconnect all settings change signals
         const settingsSignals = [
-            '_auto_detect_locationChangedId',
             '_light_mode_triggerChangedId',
             '_dark_mode_triggerChangedId',
             '_custom_light_timeChangedId',
             '_custom_dark_timeChangedId',
-            '_use_manual_coordinatesChangedId',
             '_manual_latitudeChangedId',
             '_manual_longitudeChangedId',
             '_controlBrightnessChangedId',
-            '_lightBrightnessChangedId',
-            '_darkBrightnessChangedId',
             '_trueLightModeChangedId',
         ];
 
@@ -245,13 +253,8 @@ export class ExtensionController {
             this._themeController = null;
         }
 
-        // Clean up API client
-        if (this._apiClient) {
-            this._apiClient.destroy();
-            this._apiClient = null;
-        }
-
         // Clean up all references
+        this._solarCalculator = null;
         this._settings = null;
         this._debugInfo = null;
         this._lightTime = null;
@@ -260,57 +263,38 @@ export class ExtensionController {
         this._extension = null;
     }
 
-    async _scheduleNextChangeEvent(isInitialEnable = false) {
-        // Clear all scheduling timeouts
+    _scheduleNextChangeEvent(isInitialEnable = false) {
+        // Clear existing schedule timeout
         if (this._scheduleTimeoutId) {
             GLib.source_remove(this._scheduleTimeoutId);
             this._scheduleTimeoutId = null;
         }
-        if (this._apiRetryTimeoutId) {
-            GLib.source_remove(this._apiRetryTimeoutId);
-            this._apiRetryTimeoutId = null;
-        }
 
-        const autoDetectLocation = this._settings.get_boolean('auto-detect-location');
-        const useManualCoordinates = this._settings.get_boolean('use-manual-coordinates');
         const now = new Date();
+        const latitude = this._settings.get_string('manual-latitude');
+        const longitude = this._settings.get_string('manual-longitude');
 
-        let lightTime, darkTime, apiData = null;
+        let lightTime, darkTime, solarTimes = null;
         let lightModeTrigger, darkModeTrigger;
 
-        if (autoDetectLocation) {
-            apiData = await this._apiClient.getApiData();
-            if (!apiData || !apiData.results) {
-                this._apiRetryTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, API_REFRESH_INTERVAL_SECONDS, () => {
-                    this._scheduleNextChangeEvent();
-                    return GLib.SOURCE_REMOVE;
-                });
-                return;
-            }
+        // Check if coordinates are set and valid
+        const hasCoordinates = latitude && longitude &&
+            this._solarCalculator.validateCoordinates(latitude, longitude);
 
-            lightModeTrigger = this._settings.get_string('light-mode-trigger');
-            lightTime = this._timeCalculator.parseTriggerTime(lightModeTrigger, apiData.results, now, 'light', this._settings);
+        if (hasCoordinates) {
+            // Calculate solar times locally - no API calls needed!
+            solarTimes = this._solarCalculator.getSolarTimes(now, latitude, longitude);
 
-            darkModeTrigger = this._settings.get_string('dark-mode-trigger');
-            darkTime = this._timeCalculator.parseTriggerTime(darkModeTrigger, apiData.results, now, 'dark', this._settings);
-        } else if (useManualCoordinates) {
-            const latitude = this._settings.get_string('manual-latitude');
-            const longitude = this._settings.get_string('manual-longitude');
+            if (solarTimes) {
+                lightModeTrigger = this._settings.get_string('light-mode-trigger');
+                lightTime = this._timeCalculator.parseTriggerTime(lightModeTrigger, solarTimes, now, 'light', this._settings);
 
-            if (!latitude || !longitude) {
-                console.error('ThemeSwitcher: Manual coordinates not set, falling back to custom times');
-            } else {
-                apiData = await this._apiClient.getApiDataForCoordinates(latitude, longitude);
-                if (apiData && apiData.results) {
-                    lightModeTrigger = this._settings.get_string('light-mode-trigger');
-                    lightTime = this._timeCalculator.parseTriggerTime(lightModeTrigger, apiData.results, now, 'light', this._settings);
-
-                    darkModeTrigger = this._settings.get_string('dark-mode-trigger');
-                    darkTime = this._timeCalculator.parseTriggerTime(darkModeTrigger, apiData.results, now, 'dark', this._settings);
-                }
+                darkModeTrigger = this._settings.get_string('dark-mode-trigger');
+                darkTime = this._timeCalculator.parseTriggerTime(darkModeTrigger, solarTimes, now, 'dark', this._settings);
             }
         }
 
+        // Fall back to custom times if no coordinates or solar calculation failed
         if (!lightTime || !darkTime) {
             const customLightTime = this._settings.get_string('custom-light-time');
             const customDarkTime = this._settings.get_string('custom-dark-time');
@@ -319,13 +303,14 @@ export class ExtensionController {
             darkTime = this._timeCalculator.parseCustomTime(customDarkTime, now);
             lightModeTrigger = 'custom';
             darkModeTrigger = 'custom';
+
+            if (!hasCoordinates) {
+                console.log('ThemeSwitcher: No coordinates set, using custom times');
+            }
         }
 
         if (!lightTime || !darkTime) {
-            this._apiRetryTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, API_REFRESH_INTERVAL_SECONDS, () => {
-                this._scheduleNextChangeEvent();
-                return GLib.SOURCE_REMOVE;
-            });
+            console.error('ThemeSwitcher: Failed to determine switch times');
             return;
         }
 
@@ -336,14 +321,17 @@ export class ExtensionController {
         this._brightnessController.setTimes(lightTime, darkTime);
         this._brightnessController.scheduleBrightnessUpdates();
 
-        // Store debug info (after setting times so calculateBrightness works)
-        this._storeDebugInfo(now, lightTime, darkTime, lightModeTrigger, darkModeTrigger, apiData ? apiData.results : null);
+        // Store debug info
+        this._storeDebugInfo(now, lightTime, darkTime, lightModeTrigger, darkModeTrigger, solarTimes);
 
         // Determine current mode and next event
         let nextEventTime, switchToDark;
         if (now >= darkTime || now < lightTime) {
             this._themeController.switchTheme(true, true, this._manualModeActive);
-            this._brightnessController.updateBrightness(true);
+            // Fire-and-forget async brightness update
+            this._brightnessController.updateBrightness(true).catch(e => {
+                console.error('ExtensionController: Failed to update brightness on initial schedule:', e);
+            });
             switchToDark = false;
             if (now < lightTime) {
                 nextEventTime = lightTime;
@@ -353,7 +341,10 @@ export class ExtensionController {
             this._debugInfo.currentMode = 'night';
         } else {
             this._themeController.switchTheme(false, true, this._manualModeActive);
-            this._brightnessController.updateBrightness(true);
+            // Fire-and-forget async brightness update
+            this._brightnessController.updateBrightness(true).catch(e => {
+                console.error('ExtensionController: Failed to update brightness on initial schedule:', e);
+            });
             switchToDark = true;
             nextEventTime = darkTime;
             this._debugInfo.currentMode = 'day';
@@ -367,17 +358,23 @@ export class ExtensionController {
 
         this._scheduleTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secondsToNextEvent, () => {
             this._themeController.switchTheme(switchToDark, true, this._manualModeActive);
-            this._brightnessController.updateBrightness(true);
+            // Fire-and-forget async brightness update
+            this._brightnessController.updateBrightness(true).catch(e => {
+                console.error('ExtensionController: Failed to update brightness on scheduled event:', e);
+            });
             this._scheduleNextChangeEvent();
             return GLib.SOURCE_REMOVE;
         });
 
         if (isInitialEnable) {
-            this._brightnessController.updateBrightness(true);
+            // Fire-and-forget async brightness update
+            this._brightnessController.updateBrightness(true).catch(e => {
+                console.error('ExtensionController: Failed to update brightness on initial enable:', e);
+            });
         }
     }
 
-    _storeDebugInfo(now, lightTime, darkTime, lightTrigger, darkTrigger, apiResults) {
+    _storeDebugInfo(now, lightTime, darkTime, lightTrigger, darkTrigger, solarTimes) {
         const controlBrightness = this._settings.get_boolean('control-brightness');
 
         const lastUpdateStr = this._settings.get_string('last-brightness-update');
@@ -385,94 +382,197 @@ export class ExtensionController {
 
         let brightnessInfo = {
             enabled: controlBrightness,
-            lightBrightness: 'N/A',
-            darkBrightness: 'N/A',
-            currentBrightness: 'N/A',
-            trend: 'N/A',
-            nextUpdateIn: 'N/A',
+            monitors: [],
+            brightnessState: 'N/A',
+            nextTransition: 'N/A',
             lastUpdateTimestamp: lastUpdateTimestamp,
         };
 
-        if (controlBrightness && lightTime && darkTime) {
-            const lightBrightness = this._settings.get_int('light-brightness');
-            const darkBrightness = this._settings.get_int('dark-brightness');
+        if (controlBrightness) {
+            // Load all enabled and initialized monitors (even if we can't calculate current brightness)
+            try {
+                const monitorsJson = this._settings.get_string('monitors');
+                const monitors = JSON.parse(monitorsJson);
+                const enabledMonitors = monitors.filter(m => m.enabled && m.initialized);
 
-            const currentBrightness = this._brightnessController.calculateBrightness(now, lightBrightness, darkBrightness);
+                // Sort monitors: built-in first, then external monitors
+                enabledMonitors.sort((a, b) => {
+                    if (a.id === 'builtin') return -1;
+                    if (b.id === 'builtin') return 1;
+                    return 0;
+                });
 
-            const gradualDecreaseEnabled = this._settings.get_boolean('gradual-brightness-decrease-enabled');
-            const gradualIncreaseEnabled = this._settings.get_boolean('gradual-brightness-increase-enabled');
-            const decreaseDuration = this._settings.get_int('gradual-brightness-decrease-duration');
-            const increaseDuration = this._settings.get_int('gradual-brightness-increase-duration');
+                // Calculate brightness info for each monitor
+                for (const monitor of enabledMonitors) {
+                    const { lightBrightness, darkBrightness, name } = monitor;
 
-            let brightnessState = 'N/A';
-            let nextTransition = 'N/A';
-
-            const inDayPeriod = now >= lightTime && now < darkTime;
-
-            if (inDayPeriod) {
-                if (gradualDecreaseEnabled) {
-                    const dimStartTime = new Date(darkTime.getTime() - (decreaseDuration * MS_PER_SECOND));
-
-                    if (now < dimStartTime) {
-                        brightnessState = 'Not in adjustment window';
-                        const timeUntilDim = Math.round((dimStartTime.getTime() - now.getTime()) / MS_PER_SECOND);
-                        const hours = Math.floor(timeUntilDim / 3600);
-                        const minutes = Math.floor((timeUntilDim % 3600) / 60);
-                        nextTransition = `Dimming starts in ${hours > 0 ? hours + 'h ' : ''}${minutes}m`;
-                    } else if (now < darkTime) {
-                        const progress = Math.round(((now.getTime() - dimStartTime.getTime()) / (decreaseDuration * MS_PER_SECOND)) * 100);
-                        brightnessState = `Dimming (${progress}%)`;
-                        nextTransition = `Reaches ${darkBrightness}% at dark mode`;
-                    } else {
-                        brightnessState = `At ${darkBrightness}%`;
+                    if (lightBrightness === null || darkBrightness === null) {
+                        continue; // Skip monitors without brightness values
                     }
-                } else {
-                    brightnessState = 'Not in adjustment window (gradual decrease disabled)';
-                    nextTransition = 'N/A';
-                }
-            } else {
-                let nextLightTime = lightTime;
-                if (now >= darkTime) {
-                    nextLightTime = new Date(lightTime.getTime() + MS_PER_DAY);
-                }
 
-                if (gradualIncreaseEnabled) {
-                    const brightenStartTime = new Date(nextLightTime.getTime() - (increaseDuration * MS_PER_SECOND));
+                    let currentBrightness = null;
 
-                    if (now < brightenStartTime) {
-                        brightnessState = 'Not in adjustment window';
-                        const timeUntilBrighten = Math.round((brightenStartTime.getTime() - now.getTime()) / MS_PER_SECOND);
-                        const hours = Math.floor(timeUntilBrighten / 3600);
-                        const minutes = Math.floor((timeUntilBrighten % 3600) / 60);
-                        nextTransition = `Brightening starts in ${hours > 0 ? hours + 'h ' : ''}${minutes}m`;
-                    } else if (now < nextLightTime) {
-                        const progress = Math.round(((now.getTime() - brightenStartTime.getTime()) / (increaseDuration * MS_PER_SECOND)) * 100);
-                        brightnessState = `Brightening (${progress}%)`;
-                        nextTransition = `Reaches ${lightBrightness}% at light mode`;
-                    } else {
-                        brightnessState = `At ${lightBrightness}%`;
+                    // Only calculate current brightness if we have time data
+                    if (lightTime && darkTime) {
+                        const decreaseDuration = this._settings.get_int('gradual-brightness-decrease-duration');
+                        const increaseDuration = this._settings.get_int('gradual-brightness-increase-duration');
+
+                        currentBrightness = this._brightnessController.calculateBrightness(
+                            now, lightBrightness, darkBrightness, increaseDuration, decreaseDuration
+                        );
                     }
-                } else {
-                    brightnessState = 'Not in adjustment window (gradual increase disabled)';
-                    nextTransition = 'N/A';
+
+                    brightnessInfo.monitors.push({
+                        name: name,
+                        lightBrightness: `${lightBrightness}%`,
+                        darkBrightness: `${darkBrightness}%`,
+                        currentBrightness: currentBrightness !== null ? `${currentBrightness}%` :
+                            (lightTime && darkTime ? 'N/A' : 'Waiting for location data'),
+                    });
                 }
+
+                // Calculate overall brightness state and next transition
+                if (enabledMonitors.length > 0 && lightTime && darkTime) {
+                    const gradualDecreaseEnabled = this._settings.get_boolean('gradual-brightness-decrease-enabled');
+                    const gradualIncreaseEnabled = this._settings.get_boolean('gradual-brightness-increase-enabled');
+                    const decreaseDuration = this._settings.get_int('gradual-brightness-decrease-duration');
+                    const increaseDuration = this._settings.get_int('gradual-brightness-increase-duration');
+
+                    let brightnessState = 'N/A';
+                    let nextTransition = 'N/A';
+
+                    const inDayPeriod = now >= lightTime && now < darkTime;
+
+                    if (inDayPeriod) {
+                        if (gradualDecreaseEnabled) {
+                            const dimStartTime = new Date(darkTime.getTime() - (decreaseDuration * MS_PER_SECOND));
+
+                            if (now < dimStartTime) {
+                                brightnessState = 'Not in adjustment window';
+                                const timeUntilDim = Math.round((dimStartTime.getTime() - now.getTime()) / MS_PER_SECOND);
+                                const hours = Math.floor(timeUntilDim / 3600);
+                                const minutes = Math.floor((timeUntilDim % 3600) / 60);
+                                nextTransition = `Dimming starts in ${hours > 0 ? hours + 'h ' : ''}${minutes}m`;
+                            } else if (now < darkTime) {
+                                const progress = Math.round(((now.getTime() - dimStartTime.getTime()) / (decreaseDuration * MS_PER_SECOND)) * 100);
+                                brightnessState = `Dimming (${progress}% through transition)`;
+                                nextTransition = 'In transition';
+                            } else {
+                                brightnessState = 'Static brightness';
+                                nextTransition = 'N/A';
+                            }
+                        } else {
+                            brightnessState = 'Not in adjustment window (gradual decrease disabled)';
+                            nextTransition = 'N/A';
+                        }
+                    } else {
+                        let nextLightTime = lightTime;
+                        if (now >= darkTime) {
+                            nextLightTime = new Date(lightTime.getTime() + MS_PER_DAY);
+                        }
+
+                        if (gradualIncreaseEnabled) {
+                            const brightenStartTime = new Date(nextLightTime.getTime() - (increaseDuration * MS_PER_SECOND));
+
+                            if (now < brightenStartTime) {
+                                brightnessState = 'Not in adjustment window';
+                                const timeUntilBrighten = Math.round((brightenStartTime.getTime() - now.getTime()) / MS_PER_SECOND);
+                                const hours = Math.floor(timeUntilBrighten / 3600);
+                                const minutes = Math.floor((timeUntilBrighten % 3600) / 60);
+                                nextTransition = `Brightening starts in ${hours > 0 ? hours + 'h ' : ''}${minutes}m`;
+                            } else if (now < nextLightTime) {
+                                const progress = Math.round(((now.getTime() - brightenStartTime.getTime()) / (increaseDuration * MS_PER_SECOND)) * 100);
+                                brightnessState = `Brightening (${progress}% through transition)`;
+                                nextTransition = 'In transition';
+                            } else {
+                                brightnessState = 'Static brightness';
+                                nextTransition = 'N/A';
+                            }
+                        } else {
+                            brightnessState = 'Not in adjustment window (gradual increase disabled)';
+                            nextTransition = 'N/A';
+                        }
+                    }
+
+                    brightnessInfo.brightnessState = brightnessState;
+                    brightnessInfo.nextTransition = nextTransition;
+                }
+            } catch (e) {
+                console.warn('Failed to load monitor brightness settings for debug info:', e);
             }
-
-            brightnessInfo = {
-                enabled: true,
-                lightBrightness: `${lightBrightness}%`,
-                darkBrightness: `${darkBrightness}%`,
-                currentBrightness: currentBrightness !== null ? `${currentBrightness}%` : 'N/A (outside adjustment window)',
-                brightnessState: brightnessState,
-                nextTransition: nextTransition,
-                lastUpdateTimestamp: lastUpdateTimestamp,
-            };
         }
+
+        const latitude = this._settings.get_string('manual-latitude');
+        const longitude = this._settings.get_string('manual-longitude');
+        const locationName = this._settings.get_string('location-name');
+
+        // Calculate tomorrow's solar times if we have coordinates
+        let tomorrowSolarTimes = null;
+        if (solarTimes && latitude && longitude) {
+            const tomorrow = new Date(now);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            tomorrowSolarTimes = this._solarCalculator.getSolarTimes(tomorrow, latitude, longitude);
+        }
+
+        // Format date for display (e.g., "Mon, Dec 4")
+        const formatDate = (date) => {
+            return date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+        };
+
+        // Helper to format solar times object with date
+        const formatSolarTimesWithDate = (times, date) => {
+            if (!times) return null;
+            return {
+                date: formatDate(date),
+                firstLight: times.first_light?.toLocaleTimeString() || 'N/A',
+                nauticalDawn: times.nautical_dawn?.toLocaleTimeString() || 'N/A',
+                dawn: times.dawn?.toLocaleTimeString() || 'N/A',
+                sunrise: times.sunrise?.toLocaleTimeString() || 'N/A',
+                sunriseEnd: times.sunrise_end?.toLocaleTimeString() || 'N/A',
+                goldenHourEnd: times.golden_hour_end?.toLocaleTimeString() || 'N/A',
+                solarNoon: times.solar_noon?.toLocaleTimeString() || 'N/A',
+                goldenHour: times.golden_hour?.toLocaleTimeString() || 'N/A',
+                sunsetStart: times.sunset_start?.toLocaleTimeString() || 'N/A',
+                sunset: times.sunset?.toLocaleTimeString() || 'N/A',
+                dusk: times.dusk?.toLocaleTimeString() || 'N/A',
+                nauticalDusk: times.nautical_dusk?.toLocaleTimeString() || 'N/A',
+                lastLight: times.last_light?.toLocaleTimeString() || 'N/A',
+            };
+        };
+
+        // Helper to format solar times object (without date, for legacy compatibility)
+        const formatSolarTimes = (times) => {
+            if (!times) return null;
+            return {
+                firstLight: times.first_light?.toLocaleTimeString() || 'N/A',
+                nauticalDawn: times.nautical_dawn?.toLocaleTimeString() || 'N/A',
+                dawn: times.dawn?.toLocaleTimeString() || 'N/A',
+                sunrise: times.sunrise?.toLocaleTimeString() || 'N/A',
+                sunriseEnd: times.sunrise_end?.toLocaleTimeString() || 'N/A',
+                goldenHourEnd: times.golden_hour_end?.toLocaleTimeString() || 'N/A',
+                solarNoon: times.solar_noon?.toLocaleTimeString() || 'N/A',
+                goldenHour: times.golden_hour?.toLocaleTimeString() || 'N/A',
+                sunsetStart: times.sunset_start?.toLocaleTimeString() || 'N/A',
+                sunset: times.sunset?.toLocaleTimeString() || 'N/A',
+                dusk: times.dusk?.toLocaleTimeString() || 'N/A',
+                nauticalDusk: times.nautical_dusk?.toLocaleTimeString() || 'N/A',
+                lastLight: times.last_light?.toLocaleTimeString() || 'N/A',
+            };
+        };
+
+        // Calculate tomorrow's date
+        const tomorrow = new Date(now);
+        tomorrow.setDate(tomorrow.getDate() + 1);
 
         const existingDebugInfo = this._debugInfo || {};
 
         this._debugInfo = {
-            apiData: apiResults || existingDebugInfo.apiData || null,
+            // Today's solar times with date
+            solarTimesToday: formatSolarTimesWithDate(solarTimes, now),
+            // Tomorrow's solar times with date
+            solarTimesTomorrow: formatSolarTimesWithDate(tomorrowSolarTimes, tomorrow),
+            // Keep legacy solarTimes for backward compatibility
+            solarTimes: formatSolarTimes(solarTimes),
             currentTime: now.toLocaleString(),
             lightTime: lightTime ? lightTime.toLocaleString() : 'N/A',
             darkTime: darkTime ? darkTime.toLocaleString() : 'N/A',
@@ -482,9 +582,11 @@ export class ExtensionController {
             nextEventTime: existingDebugInfo.nextEventTime || 'N/A',
             secondsToNextEvent: existingDebugInfo.secondsToNextEvent || 0,
             nextEventType: existingDebugInfo.nextEventType || 'N/A',
-            latitude: this._apiClient.latitude || 'N/A',
-            longitude: this._apiClient.longitude || 'N/A',
-            locationName: this._apiClient.locationName || 'Unknown',
+            latitude: latitude || 'Not set',
+            longitude: longitude || 'Not set',
+            locationName: locationName || 'Not set',
+            timezone: this._solarCalculator.getTimezone(),
+            calculationMethod: solarTimes ? 'Solar events (local calculation)' : 'Custom times',
             brightness: brightnessInfo,
         };
     }

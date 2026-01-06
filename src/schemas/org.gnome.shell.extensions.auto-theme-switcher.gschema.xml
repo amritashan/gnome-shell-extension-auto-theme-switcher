@@ -2,39 +2,40 @@
 <schemalist>
   <schema id="org.gnome.shell.extensions.auto-theme-switcher" path="/org/gnome/shell/extensions/auto-theme-switcher/">
 
-    <key name="auto-detect-location" type="b">
-      <default>false</default>
-      <summary>Automatically detect location and calculate sunrise/sunset times.</summary>
-    </key>
-
-    <key name="use-manual-coordinates" type="b">
-      <default>false</default>
-      <summary>Use manually entered coordinates instead of custom times.</summary>
-    </key>
-
+    <!-- Location Settings -->
     <key name="manual-latitude" type="s">
       <default>''</default>
-      <summary>Manual latitude for sunrise/sunset calculation.</summary>
+      <summary>Latitude for sunrise/sunset calculation.</summary>
+      <description>
+        Latitude in decimal degrees (e.g., 37.7749 for San Francisco).
+        North is positive, south is negative. Range: -90 to 90.
+        Can be set manually or via the Auto-Detect button.
+      </description>
     </key>
 
     <key name="manual-longitude" type="s">
       <default>''</default>
-      <summary>Manual longitude for sunrise/sunset calculation.</summary>
+      <summary>Longitude for sunrise/sunset calculation.</summary>
+      <description>
+        Longitude in decimal degrees (e.g., -122.4194 for San Francisco).
+        East is positive, west is negative. Range: -180 to 180.
+        Can be set manually or via the Auto-Detect button.
+      </description>
     </key>
 
+    <key name="location-name" type="s">
+      <default>''</default>
+      <summary>Human-readable location name</summary>
+      <description>
+        Display name for the configured location (e.g., "San Francisco, California, USA").
+        Set automatically when using Auto-Detect, or can be left empty for manual coordinates.
+      </description>
+    </key>
+
+    <!-- Brightness Control Settings -->
     <key name="control-brightness" type="b">
       <default>false</default>
       <summary>Control screen brightness gradually throughout the day.</summary>
-    </key>
-
-    <key name="light-brightness" type="i">
-      <default>100</default>
-      <summary>Screen brightness percentage for light mode (0-100).</summary>
-    </key>
-
-    <key name="dark-brightness" type="i">
-      <default>50</default>
-      <summary>Screen brightness percentage for dark mode (0-100).</summary>
     </key>
 
     <key name="last-brightness-update" type="s">
@@ -67,6 +68,7 @@
       <summary>Duration in seconds to gradually increase brightness before light mode trigger (default: 2 hours).</summary>
     </key>
 
+    <!-- Theme Settings -->
     <key name="light-theme" type="s">
       <default>'Adwaita'</default>
       <summary>The GTK theme to use during the day.</summary>
@@ -83,6 +85,7 @@
       <description>When enabled, switches the system color-scheme preference to make the GNOME Shell top bar light. When disabled, only GTK themes are switched while keeping the shell/top bar dark. Note: This option only affects systems using stock GNOME (like Fedora). Ubuntu keeps the top bar dark by default regardless of this setting.</description>
     </key>
 
+    <!-- Night Light Settings -->
     <key name="night-light-mode" type="s">
       <default>'disabled'</default>
       <summary>Night Light control mode ('disabled', 'sync-with-theme', or 'custom-schedule').</summary>
@@ -98,29 +101,97 @@
       <summary>Time to disable Night Light (HH:MM) when using custom schedule.</summary>
     </key>
 
+    <!-- Notification Settings -->
     <key name="show-notifications" type="b">
       <default>true</default>
       <summary>Show notifications when the theme is switched automatically.</summary>
     </key>
 
+    <!-- Trigger Settings -->
     <key name="light-mode-trigger" type="s">
       <default>'sunrise'</default>
       <summary>What time to use for switching to light mode ('first-light', 'dawn', 'sunrise', 'solar-noon', or 'custom').</summary>
+      <description>
+        Solar event triggers require coordinates to be set. If coordinates are empty, falls back to custom time.
+        - first-light: Astronomical dawn (sun 18 degrees below horizon)
+        - dawn: Civil dawn (sun 6 degrees below horizon)
+        - sunrise: Sun crosses the horizon
+        - solar-noon: Sun at highest point
+        - custom: Use the custom-light-time setting
+      </description>
     </key>
 
     <key name="dark-mode-trigger" type="s">
-      <default>'golden-hour'</default>
+      <default>'sunset'</default>
       <summary>What time to use for switching to dark mode ('solar-noon', 'golden-hour', 'sunset', 'dusk', 'last-light', or 'custom').</summary>
+      <description>
+        Solar event triggers require coordinates to be set. If coordinates are empty, falls back to custom time.
+        - solar-noon: Sun at highest point
+        - golden-hour: Sun 6 degrees above horizon (warm light for photography)
+        - sunset: Sun crosses the horizon
+        - dusk: Civil dusk (sun 6 degrees below horizon)
+        - last-light: Astronomical dusk (sun 18 degrees below horizon)
+        - custom: Use the custom-dark-time setting
+      </description>
     </key>
 
     <key name="custom-light-time" type="s">
       <default>'07:00'</default>
-      <summary>The custom time (HH:MM) to switch to light mode if light-mode-trigger is 'custom'.</summary>
+      <summary>The custom time (HH:MM) to switch to light mode if light-mode-trigger is 'custom' or no coordinates are set.</summary>
     </key>
 
     <key name="custom-dark-time" type="s">
       <default>'19:00'</default>
-      <summary>The custom time (HH:MM) to switch to dark mode if dark-mode-trigger is 'custom'.</summary>
+      <summary>The custom time (HH:MM) to switch to dark mode if dark-mode-trigger is 'custom' or no coordinates are set.</summary>
+    </key>
+
+    <!-- Monitor Brightness Settings -->
+    <key name="monitors" type="s">
+      <default>'[]'</default>
+      <summary>JSON array of all monitor configurations (built-in and external)</summary>
+      <description>
+        Stores configuration for all monitors including:
+        - Built-in display (via brightnessctl)
+        - External monitors (via ddcutil with DDC/CI protocol)
+        Each monitor includes:
+        - Monitor identification (type, manufacturer, model, serial number)
+        - Display number and I2C bus (for external monitors)
+        - Light and dark mode brightness values
+        - Gradual transition durations (increase/decrease)
+        - Enabled/disabled state
+        - Last seen timestamp
+      </description>
+    </key>
+
+    <key name="monitors-last-detection" type="x">
+      <default>0</default>
+      <summary>Unix timestamp (milliseconds) of last monitor detection</summary>
+      <description>Used to show "last detected" time in the UI</description>
+    </key>
+
+    <!-- Data Migration -->
+    <key name="data-version" type="i">
+      <default>0</default>
+      <summary>Data structure version for migrations</summary>
+      <description>
+        Version of the data structure format. Used to determine which migrations to run.
+        Version history:
+        - 0: Original published version with light-brightness/dark-brightness keys,
+             API-based location detection and solar calculations (pre-v6)
+        - 1: Current version with monitors array (built-in + external monitors),
+             local solar calculations, removed API dependencies (v6+)
+        Future versions will be numbered 2, 3, etc.
+      </description>
+    </key>
+
+    <key name="migration-notification-pending" type="s">
+      <default>''</default>
+      <summary>Pending migration notification type</summary>
+      <description>
+        Set by MigrationManager after a migration completes. The ExtensionController
+        reads this on startup to show a one-time notification, then clears it.
+        Values: '' (none), 'v0-to-v1' (location detection changed)
+      </description>
     </key>
 
   </schema>

@@ -1,0 +1,11 @@
+[/]
+auto-detect-location=true
+control-brightness=true
+dark-brightness=19
+dark-theme='Adwaita'
+gradual-brightness-decrease-duration=1800
+gradual-brightness-decrease-enabled=true
+gradual-brightness-increase-duration=5400
+gradual-brightness-increase-enabled=true
+light-brightness=30
+light-theme='Adwaita'

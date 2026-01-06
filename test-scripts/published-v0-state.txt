@@ -1,0 +1,49 @@
+=== Capturing Old Extension Data State ===
+
+Timestamp: Wed Dec 10 04:38:01 PM IST 2025
+
+=== All Settings Keys ===
+auto-detect-location
+control-brightness
+dark-brightness
+dark-theme
+gradual-brightness-decrease-duration
+gradual-brightness-decrease-enabled
+gradual-brightness-increase-duration
+gradual-brightness-increase-enabled
+light-brightness
+light-theme
+
+=== Critical Values ===
+control-brightness: true
+light-brightness: 30
+dark-brightness: 19
+gradual-brightness-increase-enabled: true
+gradual-brightness-increase-duration: 5400
+gradual-brightness-decrease-enabled: true
+gradual-brightness-decrease-duration: 1800
+
+data-version: 
+monitors: 
+
+=== Full Settings Dump ===
+[/]
+auto-detect-location=true
+control-brightness=true
+dark-brightness=19
+dark-theme='Adwaita'
+gradual-brightness-decrease-duration=1800
+gradual-brightness-decrease-enabled=true
+gradual-brightness-increase-duration=5400
+gradual-brightness-increase-enabled=true
+light-brightness=30
+light-theme='Adwaita'
+
+Data captured to: /home/amritashan/migration-test-backups/old-data-20251210-163801.txt
+
+=== Expected Values (verify these) ===
+control-brightness: true
+light-brightness: 85
+dark-brightness: 20
+increase-duration: 3600
+decrease-duration: 5400

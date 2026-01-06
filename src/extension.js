@@ -1,6 +1,7 @@
 import Gio from 'gi://Gio';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { ExtensionController } from './extensionController.js';
+import { MigrationManager } from './migrationManager.js';
 
 const ThemeSwitcherIface = `
 <node>
@@ -26,12 +27,26 @@ const ThemeSwitcherIface = `
 // This extension does NOT connect to any keyboard events in unlock-dialog mode.
 export default class ThemeSwitcherExtension extends Extension {
     enable() {
-        this._controller = new ExtensionController(this);
-        this._controller.enable();
+        const settings = this.getSettings();
 
-        // Export DBus interface
-        this._dbus = Gio.DBusExportedObject.wrapJSObject(ThemeSwitcherIface, this);
-        this._dbus.export(Gio.DBus.session, '/org/gnome/Shell/Extensions/AutoThemeSwitcher');
+        // Run migrations first (async), then enable controller
+        const migrationManager = new MigrationManager(settings);
+        migrationManager.run().then(() => {
+            this._controller = new ExtensionController(this);
+            this._controller.enable();
+
+            // Export DBus interface
+            this._dbus = Gio.DBusExportedObject.wrapJSObject(ThemeSwitcherIface, this);
+            this._dbus.export(Gio.DBus.session, '/org/gnome/Shell/Extensions/AutoThemeSwitcher');
+        }).catch(e => {
+            console.error(`ThemeSwitcher: Migration failed: ${e}`);
+            // Still enable controller even if migration fails
+            this._controller = new ExtensionController(this);
+            this._controller.enable();
+
+            this._dbus = Gio.DBusExportedObject.wrapJSObject(ThemeSwitcherIface, this);
+            this._dbus.export(Gio.DBus.session, '/org/gnome/Shell/Extensions/AutoThemeSwitcher');
+        });
     }
 
     GetDebugInfo() {

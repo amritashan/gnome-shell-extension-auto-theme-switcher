@@ -1,5 +1,6 @@
-# Build directory
+# Build directories
 build/
+build-dev/
 
 # Package file
 *.shell-extension.zip
@@ -20,3 +21,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+migration/
+plan/
+reviews/

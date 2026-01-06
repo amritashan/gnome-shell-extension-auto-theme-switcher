@@ -12,9 +12,6 @@ export const MS_PER_DAY = HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE 
 export const BRIGHTNESS_UPDATE_INTERVAL_SECONDS = 600; // 10 minutes
 export const BRIGHTNESS_UPDATE_INTERVAL_MS = BRIGHTNESS_UPDATE_INTERVAL_SECONDS * MS_PER_SECOND;
 
-// API refresh interval (how often to fetch new sunrise/sunset times from API)
-export const API_REFRESH_INTERVAL_SECONDS = 900; // 15 minutes
-
 // Debug panel refresh intervals
 export const DEBUG_TIME_UPDATE_INTERVAL_SECONDS = 1; // Update countdown every second
 export const DEBUG_INFO_REFRESH_INTERVAL_SECONDS = 5; // Refresh debug info every 5 seconds

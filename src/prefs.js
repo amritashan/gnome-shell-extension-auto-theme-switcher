@@ -2,151 +2,119 @@ import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Soup from 'gi://Soup';
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 import {
-    BRIGHTNESS_UPDATE_INTERVAL_MS,
     DEBUG_TIME_UPDATE_INTERVAL_SECONDS,
     DEBUG_INFO_REFRESH_INTERVAL_SECONDS,
-    FORCE_REFRESH_DEBOUNCE_MS,
     MS_PER_SECOND,
-    BRIGHTNESS_TRANSITION_DURATIONS
 } from './constants.js';
+import { MonitorConfigDialog } from './externalMonitorDialog.js';
 
 export default class ThemeSwitcherPreferences extends ExtensionPreferences {
-    fillPreferencesWindow(window) {
-        // Get the settings schema for this extension
-        this.settings = this.getSettings();
+    /**
+     * Get available GTK themes from all standard theme directories
+     * Handles NixOS and other non-standard Linux distributions
+     */
+    _getAvailableThemes() {
+        const themes = new Set();
+        const themeDirs = [];
 
-        // Create a preferences page and group
+        // User theme directories
+        const homeDir = GLib.get_home_dir();
+        themeDirs.push(GLib.build_filenamev([homeDir, '.themes']));
+        themeDirs.push(GLib.build_filenamev([homeDir, '.local', 'share', 'themes']));
+
+        // System theme directories from XDG_DATA_DIRS (works on NixOS)
+        const dataDirs = GLib.get_system_data_dirs();
+        for (const dataDir of dataDirs) {
+            themeDirs.push(GLib.build_filenamev([dataDir, 'themes']));
+        }
+
+        // Check each directory for themes
+        for (const dirPath of themeDirs) {
+            try {
+                const dir = Gio.File.new_for_path(dirPath);
+                if (!dir.query_exists(null)) {
+                    continue;
+                }
+
+                const enumerator = dir.enumerate_children(
+                    'standard::name,standard::type',
+                    Gio.FileQueryInfoFlags.NONE,
+                    null
+                );
+
+                let info;
+                while ((info = enumerator.next_file(null))) {
+                    const name = info.get_name();
+
+                    // Skip hidden folders
+                    if (name.startsWith('.')) {
+                        continue;
+                    }
+
+                    // Add directories and symbolic links (NixOS uses symlinks to Nix store)
+                    const fileType = info.get_file_type();
+                    if (fileType === Gio.FileType.DIRECTORY ||
+                        fileType === Gio.FileType.SYMBOLIC_LINK) {
+                        themes.add(name);
+                    }
+                }
+            } catch (e) {
+                // Directory doesn't exist or isn't readable - skip it
+                console.log(`Prefs: Could not read theme directory ${dirPath}: ${e.message}`);
+            }
+        }
+
+        // Convert to sorted array
+        return Array.from(themes).sort((a, b) => a.localeCompare(b));
+    }
+
+    fillPreferencesWindow(window) {
+        console.log('Prefs: fillPreferencesWindow called');
+        this.settings = this.getSettings();
+        this._settingsSignalIds = [];  // Track settings signals for cleanup
+        this._locationSession = null;  // Track Soup.Session for cleanup
+        console.log(`Prefs: Got settings with schema: ${this.settings.schema_id}`);
+
         const page = new Adw.PreferencesPage({
             title: 'Settings',
             icon_name: 'preferences-system-symbolic',
         });
 
-        // --- Auto-Detect Location Toggle ---
-        const locationGroup = new Adw.PreferencesGroup({ title: 'Location Detection' });
-        page.add(locationGroup);
+        // --- Theme Settings Group ---
+        const themeGroup = new Adw.PreferencesGroup({ title: 'Theme Settings' });
+        page.add(themeGroup);
 
-        const autoDetectRow = new Adw.ActionRow({
-            title: 'Auto-detect Location',
-            subtitle: 'Automatically detect your location using IP address',
-        });
-        const autoDetectToggle = new Gtk.Switch({
-            active: this.settings.get_boolean('auto-detect-location'),
-            valign: Gtk.Align.CENTER,
-        });
-        autoDetectRow.add_suffix(autoDetectToggle);
-        autoDetectRow.activatable_widget = autoDetectToggle;
-        locationGroup.add(autoDetectRow);
+        // Get available themes from all theme directories
+        const availableThemes = this._getAvailableThemes();
 
-        // Disclaimer banner for auto-detect
-        const disclaimerExpander = new Adw.ExpanderRow({
-            title: 'Important: Location Accuracy',
-            subtitle: 'Click to learn about auto-detection limitations',
-            show_enable_switch: false,
-        });
-
-        const disclaimerContent = new Gtk.Box({
-            orientation: Gtk.Orientation.VERTICAL,
-            spacing: 6,
-            margin_top: 6,
-            margin_bottom: 12,
-            margin_start: 12,
-            margin_end: 12,
-        });
-
-        const warningLabel = new Gtk.Label({
-            label: '⚠️ Location is approximate based on IP address',
-            xalign: 0,
-            wrap: true,
-        });
-        warningLabel.add_css_class('warning');
-
-        const detailLabel = new Gtk.Label({
-            label: '• Timings may be inaccurate if using a VPN or proxy\n• IP-based detection can be off by several kilometers\n• For precise results, turn off Auto-detect Location to enter coordinates manually',
-            xalign: 0,
-            wrap: true,
-        });
-        detailLabel.add_css_class('dim-label');
-
-        disclaimerContent.append(warningLabel);
-        disclaimerContent.append(detailLabel);
-
-        disclaimerExpander.add_row(new Adw.PreferencesRow({
-            child: disclaimerContent,
-        }));
-
-        locationGroup.add(disclaimerExpander);
-
-        // Manual coordinates section (shown when auto-detect is OFF)
-        const manualCoordinatesToggleRow = new Adw.ActionRow({
-            title: 'Use Manual Coordinates',
-            subtitle: 'Enter your exact latitude and longitude for precise sunrise/sunset times',
-        });
-        const manualCoordinatesToggle = new Gtk.Switch({
-            active: this.settings.get_boolean('use-manual-coordinates'),
-            valign: Gtk.Align.CENTER,
-        });
-        manualCoordinatesToggleRow.add_suffix(manualCoordinatesToggle);
-        manualCoordinatesToggleRow.activatable_widget = manualCoordinatesToggle;
-        locationGroup.add(manualCoordinatesToggleRow);
-
-        const latitudeRow = new Adw.ActionRow({
-            title: 'Latitude',
-            subtitle: 'Example: 37.7749 (north is positive, south is negative)',
-        });
-        const latitudeEntry = new Gtk.Entry({
-            text: this.settings.get_string('manual-latitude'),
-            placeholder_text: '0.0000',
-            valign: Gtk.Align.CENTER,
-        });
-        latitudeRow.add_suffix(latitudeEntry);
-        locationGroup.add(latitudeRow);
-
-        const longitudeRow = new Adw.ActionRow({
-            title: 'Longitude',
-            subtitle: 'Example: -122.4194 (east is positive, west is negative)',
-        });
-        const longitudeEntry = new Gtk.Entry({
-            text: this.settings.get_string('manual-longitude'),
-            placeholder_text: '0.0000',
-            valign: Gtk.Align.CENTER,
-        });
-        longitudeRow.add_suffix(longitudeEntry);
-        locationGroup.add(longitudeRow);
-
-        const group = new Adw.PreferencesGroup({ title: 'Theme Settings' });
-        page.add(group);
-
-        // --- Light Theme Dropdown ---
+        // Light Theme Dropdown
         const lightThemeRow = new Adw.ComboRow({
             title: 'Light Theme',
             subtitle: 'Theme to use during the day',
         });
         const lightThemeModel = new Gtk.StringList();
-        // A simple way to get themes. A more robust method would be needed for production.
-        const themes = Gio.File.new_for_path('/usr/share/themes').enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
-        let info;
-        while ((info = themes.next_file(null))) {
-            lightThemeModel.append(info.get_name());
+        for (const theme of availableThemes) {
+            lightThemeModel.append(theme);
         }
         lightThemeRow.model = lightThemeModel;
-        group.add(lightThemeRow);
+        themeGroup.add(lightThemeRow);
 
-        // --- Dark Theme Dropdown ---
+        // Dark Theme Dropdown
         const darkThemeRow = new Adw.ComboRow({
             title: 'Dark Theme',
             subtitle: 'Theme to use at night',
         });
         const darkThemeModel = new Gtk.StringList();
-        const themes2 = Gio.File.new_for_path('/usr/share/themes').enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
-        while ((info = themes2.next_file(null))) {
-            darkThemeModel.append(info.get_name());
+        for (const theme of availableThemes) {
+            darkThemeModel.append(theme);
         }
         darkThemeRow.model = darkThemeModel;
-        group.add(darkThemeRow);
+        themeGroup.add(darkThemeRow);
 
-        // --- True Light Mode Toggle ---
+        // True Light Mode Toggle
         const trueLightModeRow = new Adw.ActionRow({
             title: 'True Light Mode',
             subtitle: 'Also change the Shell/top bar color when switching themes (may not work with Ubuntu)',
@@ -157,7 +125,602 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         });
         trueLightModeRow.add_suffix(trueLightModeToggle);
         trueLightModeRow.activatable_widget = trueLightModeToggle;
-        group.add(trueLightModeRow);
+        themeGroup.add(trueLightModeRow);
+
+        // Notifications Toggle
+        const notificationsRow = new Adw.ActionRow({
+            title: 'Show Notifications',
+            subtitle: 'Display a notification when theme switches automatically',
+        });
+        const notificationsToggle = new Gtk.Switch({
+            active: this.settings.get_boolean('show-notifications'),
+            valign: Gtk.Align.CENTER,
+        });
+        notificationsRow.add_suffix(notificationsToggle);
+        notificationsRow.activatable_widget = notificationsToggle;
+        themeGroup.add(notificationsRow);
+
+        // --- Timing Settings ---
+        const timingGroup = new Adw.PreferencesGroup({ title: 'Theme Switch Timing' });
+        page.add(timingGroup);
+
+        // Status row - shows different states based on location configuration
+        const timingInfoRow = new Adw.ActionRow({
+            title: 'Configure your location below to use solar events',
+            subtitle: 'Solar events include sunrise, sunset, dawn, dusk, and more',
+            icon_name: 'dialog-information-symbolic',
+        });
+        timingGroup.add(timingInfoRow);
+
+        // Light Mode Trigger - full-width dropdown with label above
+        const lightTriggerBox = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 8,
+            margin_top: 12,
+            margin_bottom: 12,
+            margin_start: 12,
+            margin_end: 12,
+        });
+
+        const lightTriggerLabel = new Gtk.Label({
+            label: 'Light Mode',
+            xalign: 0,
+        });
+        lightTriggerLabel.add_css_class('heading');
+        lightTriggerBox.append(lightTriggerLabel);
+
+        const lightTriggerModel = new Gtk.StringList();
+        lightTriggerModel.append('First Hint of Light (astronomical dawn)');
+        lightTriggerModel.append('Early Dawn (nautical twilight)');
+        lightTriggerModel.append('Dawn (civil twilight)');
+        lightTriggerModel.append('Sunrise');
+        lightTriggerModel.append('Sun Fully Up');
+        lightTriggerModel.append('Morning Golden Hour Ends');
+        lightTriggerModel.append('Solar Noon');
+        lightTriggerModel.append('Custom Time');
+
+        const lightTriggerDropdown = new Gtk.DropDown({
+            model: lightTriggerModel,
+            hexpand: true,
+        });
+        lightTriggerBox.append(lightTriggerDropdown);
+
+        const lightTriggerRow = new Adw.PreferencesRow({
+            child: lightTriggerBox,
+        });
+        timingGroup.add(lightTriggerRow);
+
+        const lightTriggerMap = {
+            0: 'first-light',
+            1: 'nautical-dawn',
+            2: 'dawn',
+            3: 'sunrise',
+            4: 'sunrise-end',
+            5: 'golden-hour-end',
+            6: 'solar-noon',
+            7: 'custom'
+        };
+        const savedLightTrigger = this.settings.get_string('light-mode-trigger');
+        const lightTriggerIndex = Object.keys(lightTriggerMap).find(key => lightTriggerMap[key] === savedLightTrigger) || 3;
+        lightTriggerDropdown.selected = parseInt(lightTriggerIndex);
+
+        // Custom Light Time Entry
+        const customLightTimeRow = new Adw.EntryRow({
+            title: 'Light Mode Time',
+            text: this.settings.get_string('custom-light-time'),
+            show_apply_button: true,
+        });
+        customLightTimeRow.set_input_purpose(Gtk.InputPurpose.FREE_FORM);
+        timingGroup.add(customLightTimeRow);
+
+        // Dark Mode Trigger - full-width dropdown with label above
+        const darkTriggerBox = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 8,
+            margin_top: 12,
+            margin_bottom: 12,
+            margin_start: 12,
+            margin_end: 12,
+        });
+
+        const darkTriggerLabel = new Gtk.Label({
+            label: 'Dark Mode',
+            xalign: 0,
+        });
+        darkTriggerLabel.add_css_class('heading');
+        darkTriggerBox.append(darkTriggerLabel);
+
+        const darkTriggerModel = new Gtk.StringList();
+        darkTriggerModel.append('Solar Noon');
+        darkTriggerModel.append('Evening Golden Hour Begins');
+        darkTriggerModel.append('Sunset Begins');
+        darkTriggerModel.append('Sunset');
+        darkTriggerModel.append('Dusk (civil twilight)');
+        darkTriggerModel.append('Late Dusk (nautical twilight)');
+        darkTriggerModel.append('Nightfall (astronomical dusk)');
+        darkTriggerModel.append('Solar Midnight');
+        darkTriggerModel.append('Custom Time');
+
+        const darkTriggerDropdown = new Gtk.DropDown({
+            model: darkTriggerModel,
+            hexpand: true,
+        });
+        darkTriggerBox.append(darkTriggerDropdown);
+
+        const darkTriggerRow = new Adw.PreferencesRow({
+            child: darkTriggerBox,
+        });
+        timingGroup.add(darkTriggerRow);
+
+        const darkTriggerMap = {
+            0: 'solar-noon',
+            1: 'golden-hour',
+            2: 'sunset-start',
+            3: 'sunset',
+            4: 'dusk',
+            5: 'nautical-dusk',
+            6: 'last-light',
+            7: 'nadir',
+            8: 'custom'
+        };
+        const savedDarkTrigger = this.settings.get_string('dark-mode-trigger');
+        const darkTriggerIndex = Object.keys(darkTriggerMap).find(key => darkTriggerMap[key] === savedDarkTrigger) || 3;
+        darkTriggerDropdown.selected = parseInt(darkTriggerIndex);
+
+        // Custom Dark Time Entry
+        const customDarkTimeRow = new Adw.EntryRow({
+            title: 'Dark Mode Time',
+            text: this.settings.get_string('custom-dark-time'),
+            show_apply_button: true,
+        });
+        customDarkTimeRow.set_input_purpose(Gtk.InputPurpose.FREE_FORM);
+        timingGroup.add(customDarkTimeRow);
+
+        // --- Location Settings (Collapsible) ---
+        const locationGroup = new Adw.PreferencesGroup({
+            title: 'Configure Location',
+        });
+        page.add(locationGroup);
+
+        const locationExpander = new Adw.ExpanderRow({
+            title: 'Location Settings',
+            subtitle: this._getLocationSubtitle(),
+            show_enable_switch: false,
+        });
+        locationGroup.add(locationExpander);
+
+        // Latitude Entry - using Adw.EntryRow for proper styling
+        const latitudeRow = new Adw.EntryRow({
+            title: 'Latitude',
+            text: this.settings.get_string('manual-latitude'),
+        });
+        latitudeRow.set_input_purpose(Gtk.InputPurpose.NUMBER);
+        locationExpander.add_row(latitudeRow);
+
+        // Longitude Entry - using Adw.EntryRow for proper styling
+        const longitudeRow = new Adw.EntryRow({
+            title: 'Longitude',
+            text: this.settings.get_string('manual-longitude'),
+        });
+        longitudeRow.set_input_purpose(Gtk.InputPurpose.NUMBER);
+        locationExpander.add_row(longitudeRow);
+
+        // Auto-Detect Button row with info tooltip
+        // Shows detected location name as subtitle when available
+        const savedLocationName = this.settings.get_string('location-name');
+        const autoDetectRow = new Adw.ActionRow({
+            title: 'Detect My Location',
+            subtitle: savedLocationName || 'Automatically detect your approximate location',
+        });
+
+        // Info button with tooltip
+        const infoButton = new Gtk.MenuButton({
+            icon_name: 'dialog-information-symbolic',
+            valign: Gtk.Align.CENTER,
+            tooltip_text: [
+                'About Auto-Detection:',
+                '',
+                '• Uses ipinfo.io to estimate location from your IP',
+                '• Location is approximate and may be inaccurate',
+                '• VPN users may get incorrect results',
+                '• Location is saved locally - detect once unless you move',
+                '• Please use sparingly - free service has rate limits',
+            ].join('\n'),
+        });
+        infoButton.add_css_class('flat');
+        // Remove the popover since we're using tooltip only
+        infoButton.set_popover(null);
+
+        const autoDetectSpinner = new Gtk.Spinner({
+            valign: Gtk.Align.CENTER,
+        });
+        autoDetectSpinner.visible = false;
+
+        const autoDetectButton = new Gtk.Button({
+            label: 'Detect',
+            valign: Gtk.Align.CENTER,
+        });
+        autoDetectButton.add_css_class('suggested-action');
+
+        autoDetectRow.add_suffix(infoButton);
+        autoDetectRow.add_suffix(autoDetectSpinner);
+        autoDetectRow.add_suffix(autoDetectButton);
+        autoDetectRow.set_activatable_widget(autoDetectButton);
+        locationExpander.add_row(autoDetectRow);
+
+        // Auto-detect button handler
+        autoDetectButton.connect('clicked', () => {
+            this._autoDetectLocation(
+                autoDetectButton,
+                autoDetectSpinner,
+                latitudeRow,
+                longitudeRow,
+                autoDetectRow,
+                locationExpander
+            );
+        });
+
+        // Update expander subtitle when coordinates change
+        const updateLocationSubtitle = () => {
+            locationExpander.set_subtitle(this._getLocationSubtitle());
+        };
+        this._settingsSignalIds.push(this.settings.connect('changed::manual-latitude', updateLocationSubtitle));
+        this._settingsSignalIds.push(this.settings.connect('changed::manual-longitude', updateLocationSubtitle));
+        this._settingsSignalIds.push(this.settings.connect('changed::location-name', updateLocationSubtitle));
+
+        // When coordinates are manually changed, clear the location name
+        // (Auto-detect will set it back immediately after setting coordinates)
+        const clearLocationNameOnManualChange = () => {
+            this.settings.set_string('location-name', '');
+            autoDetectRow.set_subtitle('Automatically detect your approximate location');
+        };
+        latitudeRow.connect('notify::text', clearLocationNameOnManualChange);
+        longitudeRow.connect('notify::text', clearLocationNameOnManualChange);
+
+        // --- Visibility Logic for Triggers ---
+        const hasCoordinates = () => {
+            const lat = this.settings.get_string('manual-latitude');
+            const lng = this.settings.get_string('manual-longitude');
+            return lat && lng && lat.trim() !== '' && lng.trim() !== '';
+        };
+
+        const updateTriggerVisibility = () => {
+            const coordsSet = hasCoordinates();
+
+            if (coordsSet) {
+                // Location is set - update info row to success state, show solar events dropdowns
+                timingInfoRow.set_icon_name('emblem-ok-symbolic');
+                timingInfoRow.set_title('Location configured');
+                timingInfoRow.set_subtitle('Solar events are now available for automatic theme switching');
+
+                lightTriggerRow.visible = true;
+                darkTriggerRow.visible = true;
+
+                // Show custom time row only if "Custom Time" is selected
+                const lightIsCustom = lightTriggerDropdown.selected === 7;
+                const darkIsCustom = darkTriggerDropdown.selected === 8;
+                customLightTimeRow.visible = lightIsCustom;
+                customDarkTimeRow.visible = darkIsCustom;
+            } else {
+                // No location - show info row with prompt, hide solar events dropdowns, show time entries
+                timingInfoRow.set_icon_name('dialog-information-symbolic');
+                timingInfoRow.set_title('Configure your location below to use solar events');
+                timingInfoRow.set_subtitle('Solar events include sunrise, sunset, dawn, dusk, and more');
+
+                lightTriggerRow.visible = false;
+                darkTriggerRow.visible = false;
+
+                // Always show custom time rows when no coordinates
+                customLightTimeRow.visible = true;
+                customDarkTimeRow.visible = true;
+            }
+        };
+
+        // Initial visibility update
+        updateTriggerVisibility();
+
+        // Update on settings changes
+        this._settingsSignalIds.push(this.settings.connect('changed::manual-latitude', updateTriggerVisibility));
+        this._settingsSignalIds.push(this.settings.connect('changed::manual-longitude', updateTriggerVisibility));
+
+        // Connect trigger dropdown selection changes
+        lightTriggerDropdown.connect('notify::selected', () => {
+            this.settings.set_string('light-mode-trigger', lightTriggerMap[lightTriggerDropdown.selected]);
+            updateTriggerVisibility();
+        });
+
+        darkTriggerDropdown.connect('notify::selected', () => {
+            this.settings.set_string('dark-mode-trigger', darkTriggerMap[darkTriggerDropdown.selected]);
+            updateTriggerVisibility();
+        });
+
+        // Connect time entry changes
+        customLightTimeRow.connect('apply', () => {
+            this.settings.set_string('custom-light-time', customLightTimeRow.get_text());
+        });
+        customDarkTimeRow.connect('apply', () => {
+            this.settings.set_string('custom-dark-time', customDarkTimeRow.get_text());
+        });
+
+        // --- Brightness Control ---
+        const brightnessGroup = new Adw.PreferencesGroup({ title: 'Brightness Control' });
+        page.add(brightnessGroup);
+
+        let hasBrightnessctl = false;
+
+        const controlBrightnessRow = new Adw.ActionRow({
+            title: 'Control Brightness',
+            subtitle: 'Checking for brightnessctl...',
+        });
+        const controlBrightnessToggle = new Gtk.Switch({
+            active: false,
+            sensitive: false,
+            valign: Gtk.Align.CENTER,
+        });
+        controlBrightnessRow.add_suffix(controlBrightnessToggle);
+        brightnessGroup.add(controlBrightnessRow);
+
+        // Installation instructions expander
+        const installExpander = new Adw.ExpanderRow({
+            title: 'How to Install brightnessctl',
+            subtitle: 'Click to see installation instructions',
+            show_enable_switch: false,
+        });
+
+        const installBox = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 12,
+            margin_top: 12,
+            margin_bottom: 12,
+            margin_start: 12,
+            margin_end: 12,
+        });
+
+        // Helper to add copyable command
+        const addCopyableCommand = (container, command) => {
+            const commandBox = new Gtk.Box({
+                orientation: Gtk.Orientation.HORIZONTAL,
+                spacing: 6,
+            });
+            const commandEntry = new Gtk.Entry({
+                text: command,
+                editable: false,
+                hexpand: true,
+            });
+            const copyButton = new Gtk.Button({
+                label: 'Copy',
+                valign: Gtk.Align.CENTER,
+            });
+            copyButton.connect('clicked', () => {
+                const clipboard = window.get_display().get_clipboard();
+                clipboard.set(command);
+            });
+            commandBox.append(commandEntry);
+            commandBox.append(copyButton);
+            container.append(commandBox);
+        };
+
+        // Introduction
+        const introLabel = new Gtk.Label({
+            label: 'brightnessctl is required to control the built-in display brightness. Follow ALL steps below carefully.',
+            xalign: 0,
+            wrap: true,
+        });
+        introLabel.add_css_class('dim-label');
+        installBox.append(introLabel);
+
+        // Step 1: Install brightnessctl
+        const step1Label = new Gtk.Label({
+            label: 'Step 1: Install brightnessctl',
+            xalign: 0,
+            wrap: true,
+            margin_top: 12,
+        });
+        step1Label.add_css_class('heading');
+        installBox.append(step1Label);
+
+        const distroInstallNote = new Gtk.Label({
+            label: 'Ubuntu/Debian: sudo apt install brightnessctl\nFedora: sudo dnf install brightnessctl\nArch: sudo pacman -S brightnessctl\nNixOS: Add "brightnessctl" to environment.systemPackages',
+            xalign: 0,
+            wrap: true,
+        });
+        distroInstallNote.add_css_class('dim-label');
+        installBox.append(distroInstallNote);
+
+        // Step 2: Add user to video group
+        const step2Label = new Gtk.Label({
+            label: 'Step 2: Add your user to the video group',
+            xalign: 0,
+            wrap: true,
+            margin_top: 12,
+        });
+        step2Label.add_css_class('heading');
+        installBox.append(step2Label);
+
+        const videoGroupNote = new Gtk.Label({
+            label: 'This allows non-root access to backlight controls:',
+            xalign: 0,
+            wrap: true,
+        });
+        videoGroupNote.add_css_class('dim-label');
+        installBox.append(videoGroupNote);
+
+        addCopyableCommand(installBox, 'sudo usermod -aG video $USER');
+
+        const nixosNote = new Gtk.Label({
+            label: 'NixOS: Add your user to the "video" group in configuration.nix',
+            xalign: 0,
+            wrap: true,
+            margin_top: 6,
+        });
+        nixosNote.add_css_class('dim-label');
+        installBox.append(nixosNote);
+
+        // Step 3: Reboot
+        const step3Label = new Gtk.Label({
+            label: 'Step 3: Log out and log back in (or reboot)',
+            xalign: 0,
+            wrap: true,
+            margin_top: 12,
+        });
+        step3Label.add_css_class('heading');
+        installBox.append(step3Label);
+
+        const rebootNote = new Gtk.Label({
+            label: 'IMPORTANT: You must log out and log back in for the group membership to take effect. A full reboot is recommended.',
+            xalign: 0,
+            wrap: true,
+        });
+        rebootNote.add_css_class('dim-label');
+        installBox.append(rebootNote);
+
+        // Step 4: Verify
+        const step4Label = new Gtk.Label({
+            label: 'Step 4: Verify installation',
+            xalign: 0,
+            wrap: true,
+            margin_top: 12,
+        });
+        step4Label.add_css_class('heading');
+        installBox.append(step4Label);
+
+        const verifyLabel = new Gtk.Label({
+            label: 'After logging back in, verify the setup:',
+            xalign: 0,
+            wrap: true,
+        });
+        verifyLabel.add_css_class('dim-label');
+        installBox.append(verifyLabel);
+
+        const verifyStep1 = new Gtk.Label({
+            label: '1. Check group membership (should show "video"):',
+            xalign: 0,
+            wrap: true,
+            margin_top: 6,
+        });
+        verifyStep1.add_css_class('dim-label');
+        installBox.append(verifyStep1);
+
+        addCopyableCommand(installBox, 'groups | grep video');
+
+        const verifyStep2 = new Gtk.Label({
+            label: '2. Test brightness control (should show current brightness):',
+            xalign: 0,
+            wrap: true,
+            margin_top: 6,
+        });
+        verifyStep2.add_css_class('dim-label');
+        installBox.append(verifyStep2);
+
+        addCopyableCommand(installBox, 'brightnessctl get');
+
+        // Troubleshooting
+        const troubleLabel = new Gtk.Label({
+            label: 'Troubleshooting',
+            xalign: 0,
+            wrap: true,
+            margin_top: 12,
+        });
+        troubleLabel.add_css_class('heading');
+        installBox.append(troubleLabel);
+
+        const troubleNote = new Gtk.Label({
+            label: 'If "brightnessctl get" fails:\n• Ensure you logged out and back in after adding to video group\n• Some desktop displays may not have backlight control\n• Virtual machines typically do not have backlight devices\n• Run "brightnessctl -l" to list available devices',
+            xalign: 0,
+            wrap: true,
+        });
+        troubleNote.add_css_class('dim-label');
+        installBox.append(troubleNote);
+
+        installExpander.add_row(new Adw.PreferencesRow({ child: installBox }));
+        brightnessGroup.add(installExpander);
+        installExpander.visible = false;
+
+        // Configure Monitors button
+        const configureMonitorsRow = new Adw.ActionRow({
+            title: 'Configure Monitors',
+            subtitle: 'Configure brightness for built-in and external monitors',
+        });
+
+        const configureButton = new Gtk.Button({
+            label: 'Configure...',
+            valign: Gtk.Align.CENTER,
+        });
+
+        configureButton.connect('clicked', () => {
+            const dialog = new MonitorConfigDialog(window, this.settings);
+            dialog.show();
+        });
+
+        configureMonitorsRow.add_suffix(configureButton);
+        configureMonitorsRow.set_activatable_widget(configureButton);
+        brightnessGroup.add(configureMonitorsRow);
+        configureMonitorsRow.visible = false;
+
+        // Monitor status display update
+        const updateMonitorStatus = () => {
+            try {
+                const json = this.settings.get_string('monitors');
+                const monitors = JSON.parse(json);
+
+                if (Array.isArray(monitors) && monitors.length > 0) {
+                    const enabledCount = monitors.filter(m => m.enabled && m.initialized).length;
+                    const totalCount = monitors.length;
+                    const lastDetection = this.settings.get_int64('monitors-last-detection');
+
+                    let statusText = `${enabledCount} of ${totalCount} monitor${totalCount > 1 ? 's' : ''} enabled`;
+
+                    if (lastDetection > 0) {
+                        const elapsed = Date.now() - lastDetection;
+                        const minutes = Math.round(elapsed / 60000);
+
+                        if (minutes < 1) {
+                            statusText += ' • Just detected';
+                        } else if (minutes < 60) {
+                            statusText += ` • Last detected ${minutes}m ago`;
+                        } else {
+                            const hours = Math.round(minutes / 60);
+                            statusText += ` • Last detected ${hours}h ago`;
+                        }
+                    }
+
+                    configureMonitorsRow.set_subtitle(statusText);
+                }
+            } catch (e) {
+                // Ignore errors
+            }
+        };
+
+        // Async check for brightnessctl
+        this._checkBrightnessctl().then(available => {
+            hasBrightnessctl = available;
+
+            if (available) {
+                controlBrightnessRow.set_subtitle('Gradually adjust screen brightness throughout the day');
+                controlBrightnessToggle.sensitive = true;
+                controlBrightnessRow.activatable_widget = controlBrightnessToggle;
+                installExpander.visible = false;
+                configureMonitorsRow.visible = true;
+
+                this.settings.bind('control-brightness', controlBrightnessToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
+
+                updateMonitorStatus();
+                this._settingsSignalIds.push(this.settings.connect('changed::monitors', updateMonitorStatus));
+                this._settingsSignalIds.push(this.settings.connect('changed::monitors-last-detection', updateMonitorStatus));
+            } else {
+                controlBrightnessRow.set_subtitle('Package not found - see installation instructions below');
+                controlBrightnessToggle.sensitive = false;
+                installExpander.visible = true;
+                configureMonitorsRow.visible = false;
+
+                this.settings.set_boolean('control-brightness', false);
+                controlBrightnessToggle.active = false;
+            }
+        }).catch(e => {
+            console.error(`Prefs: Failed to check brightnessctl availability: ${e}`);
+            controlBrightnessRow.set_subtitle('Package not found - see installation instructions below');
+            installExpander.visible = true;
+        });
 
         // --- Night Light Options ---
         const nightLightGroup = new Adw.PreferencesGroup({ title: 'Night Light Control' });
@@ -176,9 +739,9 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         const nightLightMap = { 0: 'disabled', 1: 'sync-with-theme', 2: 'custom-schedule' };
         const savedNightLightMode = this.settings.get_string('night-light-mode');
         const nightLightIndex = Object.keys(nightLightMap).find(key => nightLightMap[key] === savedNightLightMode) || 0;
-        nightLightModeRow.selected = nightLightIndex;
+        nightLightModeRow.selected = parseInt(nightLightIndex);
 
-        // --- Night Light Custom Schedule Times ---
+        // Night Light Custom Schedule Times
         const nightLightStartRow = new Adw.ActionRow({
             title: 'Night Light Start Time (24-hour)',
         });
@@ -205,538 +768,13 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         nightLightModeRow.connect('notify::selected', () => {
             nightLightStartRow.visible = nightLightModeRow.selected === 2;
             nightLightEndRow.visible = nightLightModeRow.selected === 2;
+            this.settings.set_string('night-light-mode', nightLightMap[nightLightModeRow.selected]);
         });
-
-        // --- Notifications Toggle ---
-        const notificationsRow = new Adw.ActionRow({
-            title: 'Show Notifications',
-            subtitle: 'Display a notification when theme switches automatically',
-        });
-        const notificationsToggle = new Gtk.Switch({
-            active: this.settings.get_boolean('show-notifications'),
-            valign: Gtk.Align.CENTER,
-        });
-        notificationsRow.add_suffix(notificationsToggle);
-        notificationsRow.activatable_widget = notificationsToggle;
-        group.add(notificationsRow);
-
-        // --- Light Mode Trigger Settings ---
-        const lightTriggerGroup = new Adw.PreferencesGroup({ title: 'Light Mode Trigger' });
-        page.add(lightTriggerGroup);
-
-        const lightTriggerRow = new Adw.ComboRow({
-            title: 'Switch to Light Mode at...',
-        });
-        const lightTriggerModel = new Gtk.StringList();
-        lightTriggerModel.append('First Light');
-        lightTriggerModel.append('Dawn');
-        lightTriggerModel.append('Sunrise');
-        lightTriggerModel.append('Solar Noon');
-        lightTriggerModel.append('Specific Time');
-        lightTriggerRow.model = lightTriggerModel;
-        lightTriggerGroup.add(lightTriggerRow);
-
-        const lightTriggerMap = { 0: 'first-light', 1: 'dawn', 2: 'sunrise', 3: 'solar-noon', 4: 'custom' };
-        const savedLightTrigger = this.settings.get_string('light-mode-trigger');
-        const lightTriggerIndex = Object.keys(lightTriggerMap).find(key => lightTriggerMap[key] === savedLightTrigger) || 2;
-        lightTriggerRow.selected = lightTriggerIndex;
-
-        // --- Specific Light Time Entry ---
-        const customLightTimeRow = new Adw.ActionRow({
-            title: 'Specific Light Time (24-hour)',
-        });
-        const customLightTimeEntry = new Gtk.Entry({
-            text: this.settings.get_string('custom-light-time'),
-            valign: Gtk.Align.CENTER,
-        });
-        customLightTimeRow.add_suffix(customLightTimeEntry);
-        lightTriggerGroup.add(customLightTimeRow);
-
-        // Function to update visibility based on auto-detect and manual coordinates settings
-        const updateLightTriggerVisibility = () => {
-            const autoDetectEnabled = this.settings.get_boolean('auto-detect-location');
-            const useManualCoords = this.settings.get_boolean('use-manual-coordinates');
-
-            // Show triggers if auto-detect OR manual coordinates is enabled
-            const showTriggers = autoDetectEnabled || useManualCoords;
-
-            if (showTriggers) {
-                // Show dropdown with all options
-                lightTriggerRow.visible = true;
-                // Show time entry only if 'Specific Time' is selected
-                customLightTimeRow.visible = lightTriggerRow.selected === 3;
-            } else {
-                // Hide dropdown, only show time entry
-                lightTriggerRow.visible = false;
-                customLightTimeRow.visible = true;
-            }
-        };
-
-        // Initial visibility
-        updateLightTriggerVisibility();
-
-        // Update visibility when settings change
-        this.settings.connect('changed::auto-detect-location', updateLightTriggerVisibility);
-        this.settings.connect('changed::use-manual-coordinates', updateLightTriggerVisibility);
-
-        // Show/hide specific light time row based on trigger selection (when auto-detect is on)
-        lightTriggerRow.connect('notify::selected', () => {
-            if (this.settings.get_boolean('auto-detect-location')) {
-                customLightTimeRow.visible = lightTriggerRow.selected === 3;
-            }
-        });
-
-        // --- Dark Mode Trigger Settings ---
-        const darkTriggerGroup = new Adw.PreferencesGroup({ title: 'Dark Mode Trigger' });
-        page.add(darkTriggerGroup);
-
-        const darkTriggerRow = new Adw.ComboRow({
-            title: 'Switch to Dark Mode at...',
-        });
-        const darkTriggerModel = new Gtk.StringList();
-        darkTriggerModel.append('Solar Noon');
-        darkTriggerModel.append('Golden Hour');
-        darkTriggerModel.append('Sunset');
-        darkTriggerModel.append('Dusk');
-        darkTriggerModel.append('Last Light');
-        darkTriggerModel.append('Specific Time');
-        darkTriggerRow.model = darkTriggerModel;
-        darkTriggerGroup.add(darkTriggerRow);
-
-        const darkTriggerMap = { 0: 'solar-noon', 1: 'golden-hour', 2: 'sunset', 3: 'dusk', 4: 'last-light', 5: 'custom' };
-        const savedDarkTrigger = this.settings.get_string('dark-mode-trigger');
-        const darkTriggerIndex = Object.keys(darkTriggerMap).find(key => darkTriggerMap[key] === savedDarkTrigger) || 0;
-        darkTriggerRow.selected = darkTriggerIndex;
-
-        // --- Specific Dark Time Entry ---
-        const customDarkTimeRow = new Adw.ActionRow({
-            title: 'Specific Dark Time (24-hour)',
-        });
-        const customDarkTimeEntry = new Gtk.Entry({
-            text: this.settings.get_string('custom-dark-time'),
-            valign: Gtk.Align.CENTER,
-        });
-        customDarkTimeRow.add_suffix(customDarkTimeEntry);
-        darkTriggerGroup.add(customDarkTimeRow);
-
-        // Function to update visibility based on auto-detect and manual coordinates settings
-        const updateDarkTriggerVisibility = () => {
-            const autoDetectEnabled = this.settings.get_boolean('auto-detect-location');
-            const useManualCoords = this.settings.get_boolean('use-manual-coordinates');
-
-            // Show triggers if auto-detect OR manual coordinates is enabled
-            const showTriggers = autoDetectEnabled || useManualCoords;
-
-            if (showTriggers) {
-                // Show dropdown with all options
-                darkTriggerRow.visible = true;
-                // Show time entry only if 'Specific Time' is selected
-                customDarkTimeRow.visible = darkTriggerRow.selected === 3;
-            } else {
-                // Hide dropdown, only show time entry
-                darkTriggerRow.visible = false;
-                customDarkTimeRow.visible = true;
-            }
-        };
-
-        // Initial visibility
-        updateDarkTriggerVisibility();
-
-        // Update visibility when settings change
-        this.settings.connect('changed::auto-detect-location', updateDarkTriggerVisibility);
-        this.settings.connect('changed::use-manual-coordinates', updateDarkTriggerVisibility);
-
-        // Show/hide specific dark time row based on trigger selection (when auto-detect is on)
-        darkTriggerRow.connect('notify::selected', () => {
-            if (this.settings.get_boolean('auto-detect-location')) {
-                customDarkTimeRow.visible = darkTriggerRow.selected === 3;
-            }
-        });
-
-
-        // --- Brightness Control ---
-        const brightnessGroup = new Adw.PreferencesGroup({ title: 'Brightness Control' });
-        page.add(brightnessGroup);
-
-        // Check if brightnessctl is available
-        const hasBrightnessctl = this._checkBrightnessctl();
-
-        const controlBrightnessRow = new Adw.ActionRow({
-            title: 'Control Brightness',
-            subtitle: hasBrightnessctl ?
-                'Gradually adjust screen brightness throughout the day' :
-                '⚠️ Package not found - see installation instructions below',
-        });
-        const controlBrightnessToggle = new Gtk.Switch({
-            active: false, // Always start disabled - will be set by binding if brightnessctl is available
-            sensitive: hasBrightnessctl,
-            valign: Gtk.Align.CENTER,
-        });
-        controlBrightnessRow.add_suffix(controlBrightnessToggle);
-        // Only make row activatable if brightnessctl is available
-        if (hasBrightnessctl) {
-            controlBrightnessRow.activatable_widget = controlBrightnessToggle;
-        }
-        brightnessGroup.add(controlBrightnessRow);
-
-        // If brightnessctl is not available, show installation instructions
-        if (!hasBrightnessctl) {
-            const installExpander = new Adw.ExpanderRow({
-                title: 'How to Install brightnessctl',
-                subtitle: 'Click to see installation instructions',
-                show_enable_switch: false,
-            });
-
-            const installBox = new Gtk.Box({
-                orientation: Gtk.Orientation.VERTICAL,
-                spacing: 12,
-                margin_top: 12,
-                margin_bottom: 12,
-                margin_start: 12,
-                margin_end: 12,
-            });
-
-            const instructionLabel = new Gtk.Label({
-                label: 'Step 1: Open a terminal and install brightnessctl',
-                xalign: 0,
-                wrap: true,
-            });
-            instructionLabel.add_css_class('heading');
-
-            // Command 1: Install brightnessctl
-            const commandBox1 = new Gtk.Box({
-                orientation: Gtk.Orientation.HORIZONTAL,
-                spacing: 6,
-            });
-
-            const commandEntry1 = new Gtk.Entry({
-                text: 'sudo apt install brightnessctl',
-                editable: false,
-                hexpand: true,
-            });
-
-            const copyButton1 = new Gtk.Button({
-                label: 'Copy',
-                valign: Gtk.Align.CENTER,
-            });
-            copyButton1.connect('clicked', () => {
-                const clipboard = window.get_display().get_clipboard();
-                clipboard.set('sudo apt install brightnessctl');
-            });
-
-            commandBox1.append(commandEntry1);
-            commandBox1.append(copyButton1);
-
-            const step2Label = new Gtk.Label({
-                label: 'Step 2: Add your user to the video group for permissions',
-                xalign: 0,
-                wrap: true,
-                margin_top: 12,
-            });
-            step2Label.add_css_class('heading');
-
-            // Command 2: Add user to video group
-            const commandBox2 = new Gtk.Box({
-                orientation: Gtk.Orientation.HORIZONTAL,
-                spacing: 6,
-                margin_top: 6,
-            });
-
-            const commandEntry2 = new Gtk.Entry({
-                text: 'sudo usermod -a -G video $USER',
-                editable: false,
-                hexpand: true,
-            });
-
-            const copyButton2 = new Gtk.Button({
-                label: 'Copy',
-                valign: Gtk.Align.CENTER,
-            });
-            copyButton2.connect('clicked', () => {
-                const clipboard = window.get_display().get_clipboard();
-                clipboard.set('sudo usermod -a -G video $USER');
-            });
-
-            commandBox2.append(commandEntry2);
-            commandBox2.append(copyButton2);
-
-            const step3Label = new Gtk.Label({
-                label: 'Step 3: Log out and log back in',
-                xalign: 0,
-                wrap: true,
-                margin_top: 12,
-            });
-            step3Label.add_css_class('heading');
-
-            const logoutNote = new Gtk.Label({
-                label: 'IMPORTANT: You must log out and log back in (or reboot) for the group membership to take effect. The brightness controls will not work until you do this.',
-                xalign: 0,
-                wrap: true,
-                margin_top: 6,
-            });
-            logoutNote.add_css_class('dim-label');
-
-            const distroNote = new Gtk.Label({
-                label: 'Note: These commands work on Ubuntu/Debian. For other distributions, use your package manager.',
-                xalign: 0,
-                wrap: true,
-                margin_top: 12,
-            });
-            distroNote.add_css_class('dim-label');
-
-            installBox.append(instructionLabel);
-            installBox.append(commandBox1);
-            installBox.append(step2Label);
-            installBox.append(commandBox2);
-            installBox.append(step3Label);
-            installBox.append(logoutNote);
-            installBox.append(distroNote);
-
-            installExpander.add_row(new Adw.PreferencesRow({
-                child: installBox,
-            }));
-
-            brightnessGroup.add(installExpander);
-        }
-
-        // Brightness sliders and gradual transition controls
-        // Grouped: Light Mode Brightness + Gradual Brightening
-        const lightBrightnessRow = new Adw.ActionRow({
-            title: 'Light Mode Brightness',
-            subtitle: 'Screen brightness during light mode (%)',
-        });
-        const lightBrightnessAdjustment = new Gtk.Adjustment({
-            lower: 1,
-            upper: 100,
-            step_increment: 1,
-            page_increment: 10,
-            value: this.settings.get_int('light-brightness'),
-        });
-        const lightBrightnessScale = new Gtk.Scale({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            draw_value: true,
-            value_pos: Gtk.PositionType.RIGHT,
-            digits: 0,
-            hexpand: true,
-            valign: Gtk.Align.CENTER,
-            adjustment: lightBrightnessAdjustment,
-        });
-        lightBrightnessRow.add_suffix(lightBrightnessScale);
-        brightnessGroup.add(lightBrightnessRow);
-
-        // Gradual Brightening (combined toggle + duration)
-        const increaseDurationRow = new Adw.ComboRow({
-            title: 'Gradual brightening',
-            subtitle: 'Gradually increase brightness before light mode',
-        });
-        const increaseDurationModel = new Gtk.StringList();
-        BRIGHTNESS_TRANSITION_DURATIONS.forEach(duration => {
-            increaseDurationModel.append(duration.label);
-        });
-        increaseDurationRow.model = increaseDurationModel;
-        brightnessGroup.add(increaseDurationRow);
-
-        // Find and set the current selection (Off if disabled, otherwise the duration)
-        const savedIncreaseEnabled = this.settings.get_boolean('gradual-brightness-increase-enabled');
-        const savedIncreaseDuration = this.settings.get_int('gradual-brightness-increase-duration');
-        if (!savedIncreaseEnabled) {
-            increaseDurationRow.selected = 0; // "Off"
-        } else {
-            const increaseIndex = BRIGHTNESS_TRANSITION_DURATIONS.findIndex(d => d.value === savedIncreaseDuration);
-            increaseDurationRow.selected = increaseIndex >= 0 ? increaseIndex : 5; // Default to 2 hours (index 5)
-        }
-
-        // Grouped: Dark Mode Brightness + Gradual Dimming
-        const darkBrightnessRow = new Adw.ActionRow({
-            title: 'Dark Mode Brightness',
-            subtitle: 'Screen brightness during dark mode (%)',
-        });
-        const darkBrightnessAdjustment = new Gtk.Adjustment({
-            lower: 1,
-            upper: 100,
-            step_increment: 1,
-            page_increment: 10,
-            value: this.settings.get_int('dark-brightness'),
-        });
-        const darkBrightnessScale = new Gtk.Scale({
-            orientation: Gtk.Orientation.HORIZONTAL,
-            draw_value: true,
-            value_pos: Gtk.PositionType.RIGHT,
-            digits: 0,
-            hexpand: true,
-            valign: Gtk.Align.CENTER,
-            adjustment: darkBrightnessAdjustment,
-        });
-        darkBrightnessRow.add_suffix(darkBrightnessScale);
-        brightnessGroup.add(darkBrightnessRow);
-
-        // Gradual Dimming (combined toggle + duration)
-        const decreaseDurationRow = new Adw.ComboRow({
-            title: 'Gradual dimming',
-            subtitle: 'Gradually decrease brightness before dark mode',
-        });
-        const decreaseDurationModel = new Gtk.StringList();
-        BRIGHTNESS_TRANSITION_DURATIONS.forEach(duration => {
-            decreaseDurationModel.append(duration.label);
-        });
-        decreaseDurationRow.model = decreaseDurationModel;
-        brightnessGroup.add(decreaseDurationRow);
-
-        // Find and set the current selection (Off if disabled, otherwise the duration)
-        const savedDecreaseEnabled = this.settings.get_boolean('gradual-brightness-decrease-enabled');
-        const savedDecreaseDuration = this.settings.get_int('gradual-brightness-decrease-duration');
-        if (!savedDecreaseEnabled) {
-            decreaseDurationRow.selected = 0; // "Off"
-        } else {
-            const decreaseIndex = BRIGHTNESS_TRANSITION_DURATIONS.findIndex(d => d.value === savedDecreaseDuration);
-            decreaseDurationRow.selected = decreaseIndex >= 0 ? decreaseIndex : 5; // Default to 2 hours (index 5)
-        }
-
-        // Initialize brightness values from current system brightness
-        if (hasBrightnessctl) {
-            this._initializeBrightnessValues(lightBrightnessScale, darkBrightnessScale);
-        }
-
-        // Connect settings changes
-        // When user selects "Off" (index 0), disable the feature; otherwise enable and set duration
-        decreaseDurationRow.connect('notify::selected', () => {
-            const selected = decreaseDurationRow.selected;
-            if (selected >= 0 && selected < BRIGHTNESS_TRANSITION_DURATIONS.length) {
-                const selectedValue = BRIGHTNESS_TRANSITION_DURATIONS[selected].value;
-                if (selectedValue === 0) {
-                    // "Off" selected
-                    this.settings.set_boolean('gradual-brightness-decrease-enabled', false);
-                } else {
-                    // Duration selected
-                    this.settings.set_boolean('gradual-brightness-decrease-enabled', true);
-                    this.settings.set_int('gradual-brightness-decrease-duration', selectedValue);
-                }
-            }
-        });
-
-        increaseDurationRow.connect('notify::selected', () => {
-            const selected = increaseDurationRow.selected;
-            if (selected >= 0 && selected < BRIGHTNESS_TRANSITION_DURATIONS.length) {
-                const selectedValue = BRIGHTNESS_TRANSITION_DURATIONS[selected].value;
-                if (selectedValue === 0) {
-                    // "Off" selected
-                    this.settings.set_boolean('gradual-brightness-increase-enabled', false);
-                } else {
-                    // Duration selected
-                    this.settings.set_boolean('gradual-brightness-increase-enabled', true);
-                    this.settings.set_int('gradual-brightness-increase-duration', selectedValue);
-                }
-            }
-        });
-
-        // Show/hide brightness sliders and gradual transition controls based on control-brightness toggle
-        const updateBrightnessVisibility = () => {
-            const enabled = hasBrightnessctl && this.settings.get_boolean('control-brightness');
-            lightBrightnessRow.visible = enabled;
-            increaseDurationRow.visible = enabled;
-            darkBrightnessRow.visible = enabled;
-            decreaseDurationRow.visible = enabled;
-        };
-        updateBrightnessVisibility();
-        this.settings.connect('changed::control-brightness', updateBrightnessVisibility);
-
-        // Warning label for time conflicts
-        const brightnessWarningRow = new Adw.ActionRow({
-            title: '⚠️ Warning',
-            subtitle: '',
-        });
-        brightnessWarningRow.add_css_class('warning');
-        brightnessGroup.add(brightnessWarningRow);
-        brightnessWarningRow.visible = false;
-
-        // Function to validate and show warnings for brightness transition conflicts
-        const validateBrightnessTransitions = () => {
-            if (!hasBrightnessctl || !this.settings.get_boolean('control-brightness')) {
-                brightnessWarningRow.visible = false;
-                return;
-            }
-
-            const autoDetect = this.settings.get_boolean('auto-detect-location');
-            const lightTrigger = this.settings.get_string('light-mode-trigger');
-            const darkTrigger = this.settings.get_string('dark-mode-trigger');
-
-            // Can only validate custom times, not API-based triggers
-            if (lightTrigger !== 'custom' || darkTrigger !== 'custom') {
-                brightnessWarningRow.visible = false;
-                return;
-            }
-
-            const customLightTime = this.settings.get_string('custom-light-time');
-            const customDarkTime = this.settings.get_string('custom-dark-time');
-
-            // Parse times
-            const parseTime = (timeStr) => {
-                const [hours, minutes] = timeStr.split(':').map(Number);
-                const date = new Date();
-                date.setHours(hours, minutes, 0, 0);
-                return date;
-            };
-
-            try {
-                const lightTime = parseTime(customLightTime);
-                const darkTime = parseTime(customDarkTime);
-
-                // Calculate time between light and dark mode
-                let timeBetween;
-                if (darkTime > lightTime) {
-                    timeBetween = darkTime.getTime() - lightTime.getTime();
-                } else {
-                    // Dark time is before light time (crosses midnight)
-                    timeBetween = (24 * 60 * 60 * 1000) - (lightTime.getTime() - darkTime.getTime());
-                }
-
-                // Check if transitions are enabled (not "Off")
-                const decreaseEnabled = decreaseDurationRow.selected > 0;
-                const increaseEnabled = increaseDurationRow.selected > 0;
-                const decreaseDuration = BRIGHTNESS_TRANSITION_DURATIONS[decreaseDurationRow.selected]?.value || 0;
-                const increaseDuration = BRIGHTNESS_TRANSITION_DURATIONS[increaseDurationRow.selected]?.value || 0;
-
-                const timeBetweenSeconds = timeBetween / 1000;
-
-                // Check if transitions would overlap
-                if (decreaseEnabled && decreaseDuration >= timeBetweenSeconds) {
-                    brightnessWarningRow.subtitle = `Dimming duration (${decreaseDuration / 3600}h) is longer than the time between light and dark mode (${Math.round(timeBetweenSeconds / 3600 * 10) / 10}h). Gradual dimming will be disabled until this is fixed.`;
-                    brightnessWarningRow.visible = true;
-                    return;
-                }
-
-                if (increaseEnabled && increaseDuration >= timeBetweenSeconds) {
-                    brightnessWarningRow.subtitle = `Brightening duration (${increaseDuration / 3600}h) is longer than the time between light and dark mode (${Math.round(timeBetweenSeconds / 3600 * 10) / 10}h). Gradual brightening will be disabled until this is fixed.`;
-                    brightnessWarningRow.visible = true;
-                    return;
-                }
-
-                brightnessWarningRow.visible = false;
-            } catch (e) {
-                console.error('Error validating brightness transitions:', e);
-                brightnessWarningRow.visible = false;
-            }
-        };
-
-        // Run validation when settings change
-        this.settings.connect('changed::control-brightness', validateBrightnessTransitions);
-        this.settings.connect('changed::custom-light-time', validateBrightnessTransitions);
-        this.settings.connect('changed::custom-dark-time', validateBrightnessTransitions);
-        this.settings.connect('changed::light-mode-trigger', validateBrightnessTransitions);
-        this.settings.connect('changed::dark-mode-trigger', validateBrightnessTransitions);
-        decreaseDurationRow.connect('notify::selected', validateBrightnessTransitions);
-        increaseDurationRow.connect('notify::selected', validateBrightnessTransitions);
-
-        // Initial validation
-        validateBrightnessTransitions();
-
 
         // --- Bind settings to UI widgets ---
-        // Load saved theme selections
         const savedLightTheme = this.settings.get_string('light-theme');
         const savedDarkTheme = this.settings.get_string('dark-theme');
 
-        // Find and set the selected index for light theme
         for (let i = 0; i < lightThemeModel.get_n_items(); i++) {
             if (lightThemeModel.get_string(i) === savedLightTheme) {
                 lightThemeRow.selected = i;
@@ -744,7 +782,6 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             }
         }
 
-        // Find and set the selected index for dark theme
         for (let i = 0; i < darkThemeModel.get_n_items(); i++) {
             if (darkThemeModel.get_string(i) === savedDarkTheme) {
                 darkThemeRow.selected = i;
@@ -752,7 +789,6 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             }
         }
 
-        // Connect to save changes
         lightThemeRow.connect('notify::selected', () => {
             const selected = lightThemeRow.selected_item;
             if (selected) {
@@ -767,201 +803,14 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             }
         });
 
-        this.settings.bind('auto-detect-location', autoDetectToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
-        this.settings.bind('use-manual-coordinates', manualCoordinatesToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
-        this.settings.bind('manual-latitude', latitudeEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
-        this.settings.bind('manual-longitude', longitudeEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
+        this.settings.bind('manual-latitude', latitudeRow, 'text', Gio.SettingsBindFlags.DEFAULT);
+        this.settings.bind('manual-longitude', longitudeRow, 'text', Gio.SettingsBindFlags.DEFAULT);
         this.settings.bind('true-light-mode', trueLightModeToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
         this.settings.bind('show-notifications', notificationsToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
-        this.settings.bind('custom-light-time', customLightTimeEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
-        this.settings.bind('custom-dark-time', customDarkTimeEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
+        // Note: custom-light-time and custom-dark-time are handled via apply signal on EntryRows
         this.settings.bind('night-light-start-time', nightLightStartEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
         this.settings.bind('night-light-end-time', nightLightEndEntry, 'text', Gio.SettingsBindFlags.DEFAULT);
 
-        // Visibility logic for location-related UI elements
-        const updateLocationUIVisibility = () => {
-            const autoDetect = this.settings.get_boolean('auto-detect-location');
-            const useManualCoords = this.settings.get_boolean('use-manual-coordinates');
-
-            // Disclaimer only shows when auto-detect is ON
-            disclaimerExpander.visible = autoDetect;
-
-            // Manual coordinates toggle only shows when auto-detect is OFF
-            manualCoordinatesToggleRow.visible = !autoDetect;
-
-            // Coordinate fields only show when auto-detect is OFF AND manual coordinates is ON
-            latitudeRow.visible = !autoDetect && useManualCoords;
-            longitudeRow.visible = !autoDetect && useManualCoords;
-        };
-
-        // Initial visibility
-        updateLocationUIVisibility();
-
-        // Update visibility when settings change
-        this.settings.connect('changed::auto-detect-location', updateLocationUIVisibility);
-        this.settings.connect('changed::use-manual-coordinates', updateLocationUIVisibility);
-
-        lightTriggerRow.connect('notify::selected', () => {
-            this.settings.set_string('light-mode-trigger', lightTriggerMap[lightTriggerRow.selected]);
-        });
-
-        darkTriggerRow.connect('notify::selected', () => {
-            this.settings.set_string('dark-mode-trigger', darkTriggerMap[darkTriggerRow.selected]);
-        });
-
-        nightLightModeRow.connect('notify::selected', () => {
-            this.settings.set_string('night-light-mode', nightLightMap[nightLightModeRow.selected]);
-        });
-
-        // Brightness control bindings
-        if (hasBrightnessctl) {
-            // Only bind if brightnessctl is available
-            this.settings.bind('control-brightness', controlBrightnessToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
-        } else {
-            // If not available, ensure setting is false and toggle stays disabled
-            this.settings.set_boolean('control-brightness', false);
-            controlBrightnessToggle.active = false;
-        }
-
-        // Real-time brightness preview on slider drag
-        if (hasBrightnessctl) {
-            let originalBrightness = null;
-            let isLightGrabbed = false;
-            let isDarkGrabbed = false;
-            let currentPreviewToast = null;
-
-            // Helper to get current system brightness
-            const getCurrentBrightness = () => {
-                try {
-                    const [success, stdout] = GLib.spawn_command_line_sync('brightnessctl get');
-                    if (success) {
-                        return parseInt(new TextDecoder().decode(stdout).trim());
-                    }
-                } catch (e) {
-                    console.error(`Failed to get brightness: ${e}`);
-                }
-                return null;
-            };
-
-            // Helper to set brightness
-            const setBrightness = (value) => {
-                try {
-                    GLib.spawn_command_line_async(`brightnessctl set ${value}`);
-                } catch (e) {
-                    console.error(`Failed to set brightness: ${e}`);
-                }
-            };
-
-            // Light brightness slider with gesture for press/release detection
-            // Note: GtkScale doesn't emit released when dragging, so we attach to the row with capture phase
-            const lightGesture = new Gtk.GestureClick();
-            lightGesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE);
-            lightBrightnessRow.add_controller(lightGesture);
-
-            lightGesture.connect('pressed', () => {
-                isLightGrabbed = true;
-                originalBrightness = getCurrentBrightness();
-
-                // Show preview toast
-                const toast = new Adw.Toast({
-                    title: 'Previewing brightness...',
-                    timeout: 0,  // Don't auto-dismiss
-                });
-                currentPreviewToast = toast;
-                window.add_toast(toast);
-            });
-
-            lightGesture.connect('released', () => {
-                isLightGrabbed = false;
-
-                // Save the final value
-                const finalValue = Math.round(lightBrightnessAdjustment.get_value());
-                this.settings.set_int('light-brightness', finalValue);
-
-                // Dismiss preview toast
-                if (currentPreviewToast) {
-                    currentPreviewToast.dismiss();
-                    currentPreviewToast = null;
-                }
-
-                // Restore original brightness
-                if (originalBrightness !== null) {
-                    setBrightness(originalBrightness);
-                    originalBrightness = null;
-
-                    // Show "restored" toast
-                    const restoredToast = new Adw.Toast({
-                        title: 'Brightness restored',
-                        timeout: 2,
-                    });
-                    window.add_toast(restoredToast);
-                }
-            });
-
-            // Update brightness in real-time while grabbed
-            lightBrightnessAdjustment.connect('value-changed', () => {
-                if (isLightGrabbed) {
-                    const percent = Math.round(lightBrightnessAdjustment.get_value());
-                    setBrightness(`${percent}%`);
-                }
-            });
-
-            // Dark brightness slider with gesture for press/release detection
-            // Note: GtkScale doesn't emit released when dragging, so we attach to the row with capture phase
-            const darkGesture = new Gtk.GestureClick();
-            darkGesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE);
-            darkBrightnessRow.add_controller(darkGesture);
-
-            darkGesture.connect('pressed', () => {
-                isDarkGrabbed = true;
-                originalBrightness = getCurrentBrightness();
-
-                // Show preview toast
-                const toast = new Adw.Toast({
-                    title: 'Previewing brightness...',
-                    timeout: 0,  // Don't auto-dismiss
-                });
-                currentPreviewToast = toast;
-                window.add_toast(toast);
-            });
-
-            darkGesture.connect('released', () => {
-                isDarkGrabbed = false;
-
-                // Save the final value
-                const finalValue = Math.round(darkBrightnessAdjustment.get_value());
-                this.settings.set_int('dark-brightness', finalValue);
-
-                // Dismiss preview toast
-                if (currentPreviewToast) {
-                    currentPreviewToast.dismiss();
-                    currentPreviewToast = null;
-                }
-
-                // Restore original brightness
-                if (originalBrightness !== null) {
-                    setBrightness(originalBrightness);
-                    originalBrightness = null;
-
-                    // Show "restored" toast
-                    const restoredToast = new Adw.Toast({
-                        title: 'Brightness restored',
-                        timeout: 2,
-                    });
-                    window.add_toast(restoredToast);
-                }
-            });
-
-            // Update brightness in real-time while grabbed
-            darkBrightnessAdjustment.connect('value-changed', () => {
-                if (isDarkGrabbed) {
-                    const percent = Math.round(darkBrightnessAdjustment.get_value());
-                    setBrightness(`${percent}%`);
-                }
-            });
-        }
-
-        // Add the settings page to the window
         window.add(page);
 
         // --- Debug Panel Page ---
@@ -1009,14 +858,19 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         timeToNextRow.add_suffix(timeToNextLabel);
         debugGroup.add(timeToNextRow);
 
-        // Location info from API
+        const calculationMethodRow = new Adw.ActionRow({ title: 'Calculation Method' });
+        const calculationMethodLabel = new Gtk.Label({ label: 'N/A' });
+        calculationMethodRow.add_suffix(calculationMethodLabel);
+        debugGroup.add(calculationMethodRow);
+
+        // Location info
         const locationInfoGroup = new Adw.PreferencesGroup({ title: 'Location Information' });
         debugPage.add(locationInfoGroup);
 
-        const locationNameRow = new Adw.ActionRow({ title: 'Detected Location' });
-        const locationNameLabel = new Gtk.Label({ label: 'N/A' });
-        locationNameRow.add_suffix(locationNameLabel);
-        locationInfoGroup.add(locationNameRow);
+        const debugLocationNameRow = new Adw.ActionRow({ title: 'Location' });
+        const debugLocationNameLabel = new Gtk.Label({ label: 'N/A' });
+        debugLocationNameRow.add_suffix(debugLocationNameLabel);
+        locationInfoGroup.add(debugLocationNameRow);
 
         const coordinatesRow = new Adw.ActionRow({ title: 'Coordinates' });
         const coordinatesLabel = new Gtk.Label({ label: 'N/A' });
@@ -1028,6 +882,57 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         timezoneRow.add_suffix(timezoneLabel);
         locationInfoGroup.add(timezoneRow);
 
+        // Solar times group with Today and Tomorrow sections
+        const solarTimesGroup = new Adw.PreferencesGroup({ title: 'Calculated Solar Times' });
+        debugPage.add(solarTimesGroup);
+
+        // Helper function to create solar event rows
+        const createSolarEventRows = (expander) => {
+            const labels = {};
+
+            const events = [
+                { key: 'firstLight', title: 'First Hint of Light' },
+                { key: 'nauticalDawn', title: 'Early Dawn' },
+                { key: 'dawn', title: 'Dawn' },
+                { key: 'sunrise', title: 'Sunrise' },
+                { key: 'sunriseEnd', title: 'Sun Fully Up' },
+                { key: 'goldenHourEnd', title: 'Morning Golden Hour Ends' },
+                { key: 'solarNoon', title: 'Solar Noon' },
+                { key: 'goldenHour', title: 'Evening Golden Hour Begins' },
+                { key: 'sunsetStart', title: 'Sunset Begins' },
+                { key: 'sunset', title: 'Sunset' },
+                { key: 'dusk', title: 'Dusk' },
+                { key: 'nauticalDusk', title: 'Late Dusk' },
+                { key: 'lastLight', title: 'Nightfall' },
+            ];
+
+            for (const event of events) {
+                const row = new Adw.ActionRow({ title: event.title });
+                const label = new Gtk.Label({ label: 'N/A' });
+                row.add_suffix(label);
+                expander.add_row(row);
+                labels[event.key] = label;
+            }
+
+            return labels;
+        };
+
+        // Today's solar events
+        const todayExpander = new Adw.ExpanderRow({
+            title: 'Today',
+            subtitle: 'Loading...',
+        });
+        solarTimesGroup.add(todayExpander);
+        const todayLabels = createSolarEventRows(todayExpander);
+
+        // Tomorrow's solar events
+        const tomorrowExpander = new Adw.ExpanderRow({
+            title: 'Tomorrow',
+            subtitle: 'Loading...',
+        });
+        solarTimesGroup.add(tomorrowExpander);
+        const tomorrowLabels = createSolarEventRows(tomorrowExpander);
+
         // Brightness control information
         const brightnessInfoGroup = new Adw.PreferencesGroup({ title: 'Brightness Control' });
         debugPage.add(brightnessInfoGroup);
@@ -1037,44 +942,27 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         brightnessEnabledRow.add_suffix(brightnessEnabledLabel);
         brightnessInfoGroup.add(brightnessEnabledRow);
 
-        // Expandable row for detailed brightness info
+        const monitorBrightnessContainer = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 0,
+        });
+
+        const monitorBrightnessRow = new Adw.PreferencesRow({
+            child: monitorBrightnessContainer,
+        });
+        brightnessInfoGroup.add(monitorBrightnessRow);
+
         const brightnessDetailsExpander = new Adw.ExpanderRow({
             title: 'Brightness Details',
             subtitle: 'Click to expand',
         });
         brightnessInfoGroup.add(brightnessDetailsExpander);
 
-        // Light brightness setting
-        const lightBrightnessInfoRow = new Adw.ActionRow({ title: 'Light Mode Brightness' });
-        const lightBrightnessInfoLabel = new Gtk.Label({ label: 'N/A' });
-        lightBrightnessInfoRow.add_suffix(lightBrightnessInfoLabel);
-        brightnessDetailsExpander.add_row(lightBrightnessInfoRow);
-
-        // Dark brightness setting
-        const darkBrightnessInfoRow = new Adw.ActionRow({ title: 'Dark Mode Brightness' });
-        const darkBrightnessInfoLabel = new Gtk.Label({ label: 'N/A' });
-        darkBrightnessInfoRow.add_suffix(darkBrightnessInfoLabel);
-        brightnessDetailsExpander.add_row(darkBrightnessInfoRow);
-
-        // Current calculated brightness
-        const currentBrightnessRow = new Adw.ActionRow({ title: 'Current Calculated Brightness' });
-        const currentBrightnessLabel = new Gtk.Label({ label: 'N/A' });
-        currentBrightnessRow.add_suffix(currentBrightnessLabel);
-        brightnessDetailsExpander.add_row(currentBrightnessRow);
-
-        // Brightness trend
-        const brightnessTrendRow = new Adw.ActionRow({ title: 'Brightness Trend' });
-        const brightnessTrendLabel = new Gtk.Label({ label: 'N/A' });
-        brightnessTrendRow.add_suffix(brightnessTrendLabel);
-        brightnessDetailsExpander.add_row(brightnessTrendRow);
-
-        // Brightness state (e.g., "Stable at 100%" or "Dimming (45%)")
         const brightnessStateRow = new Adw.ActionRow({ title: 'Brightness State' });
         const brightnessStateLabel = new Gtk.Label({ label: 'N/A' });
         brightnessStateRow.add_suffix(brightnessStateLabel);
         brightnessDetailsExpander.add_row(brightnessStateRow);
 
-        // Next transition info
         const nextTransitionRow = new Adw.ActionRow({ title: 'Next Transition' });
         const nextTransitionLabel = new Gtk.Label({ label: 'N/A' });
         nextTransitionRow.add_suffix(nextTransitionLabel);
@@ -1141,8 +1029,112 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         refreshRow.add_suffix(refreshButton);
         testGroup.add(refreshRow);
 
-        // Add debug page to window
         window.add(debugPage);
+
+        // --- About Page ---
+        const aboutPage = new Adw.PreferencesPage({
+            title: 'About',
+            icon_name: 'help-about-symbolic',
+        });
+
+        const aboutGroup = new Adw.PreferencesGroup({
+            title: 'Automatic Theme Switcher',
+            description: 'Automatically switches between light and dark themes based on sunrise/sunset times for your location.',
+        });
+        aboutPage.add(aboutGroup);
+
+        const versionRow = new Adw.ActionRow({
+            title: 'Version',
+            subtitle: `${this.metadata.version}`,
+        });
+        aboutGroup.add(versionRow);
+
+        const authorRow = new Adw.ActionRow({
+            title: 'Author',
+            subtitle: 'Amritashan S. Lal',
+        });
+        aboutGroup.add(authorRow);
+
+        // Credits group
+        const creditsGroup = new Adw.PreferencesGroup({
+            title: 'Credits',
+        });
+        aboutPage.add(creditsGroup);
+
+        const suncalcRow = new Adw.ActionRow({
+            title: 'suncalc Library',
+            subtitle: 'Solar calculations by Vladimir Agafonkin (BSD-2-Clause)',
+        });
+        const suncalcButton = new Gtk.Button({
+            label: 'View',
+            valign: Gtk.Align.CENTER,
+        });
+        suncalcButton.connect('clicked', () => {
+            Gio.AppInfo.launch_default_for_uri('https://github.com/mourner/suncalc', null);
+        });
+        suncalcRow.add_suffix(suncalcButton);
+        creditsGroup.add(suncalcRow);
+
+        // Support group
+        const supportGroup = new Adw.PreferencesGroup({
+            title: 'Support This Project',
+            description: 'If you find this extension useful, consider supporting its development!',
+        });
+        aboutPage.add(supportGroup);
+
+        const sponsorRow = new Adw.ActionRow({
+            title: 'Sponsor on GitHub',
+            subtitle: 'Support with one-time or monthly donations',
+        });
+        const sponsorButton = new Gtk.Button({
+            label: 'Sponsor',
+            valign: Gtk.Align.CENTER,
+        });
+        sponsorButton.add_css_class('suggested-action');
+        sponsorButton.connect('clicked', () => {
+            Gio.AppInfo.launch_default_for_uri('https://github.com/sponsors/amritashan', null);
+        });
+        sponsorRow.add_suffix(sponsorButton);
+        sponsorRow.set_activatable_widget(sponsorButton);
+        supportGroup.add(sponsorRow);
+
+        // Links group
+        const linksGroup = new Adw.PreferencesGroup({
+            title: 'Links',
+        });
+        aboutPage.add(linksGroup);
+
+        const githubRow = new Adw.ActionRow({
+            title: 'GitHub Repository',
+            subtitle: 'View source code and contribute',
+        });
+        const githubButton = new Gtk.Button({
+            label: 'Open',
+            valign: Gtk.Align.CENTER,
+        });
+        githubButton.connect('clicked', () => {
+            Gio.AppInfo.launch_default_for_uri('https://github.com/amritashan/gnome-shell-extension-auto-theme-switcher', null);
+        });
+        githubRow.add_suffix(githubButton);
+        githubRow.set_activatable_widget(githubButton);
+        linksGroup.add(githubRow);
+
+        const issuesRow = new Adw.ActionRow({
+            title: 'Report an Issue',
+            subtitle: 'Found a bug? Let us know!',
+        });
+        const issuesButton = new Gtk.Button({
+            label: 'Report',
+            valign: Gtk.Align.CENTER,
+        });
+        issuesButton.connect('clicked', () => {
+            Gio.AppInfo.launch_default_for_uri('https://github.com/amritashan/gnome-shell-extension-auto-theme-switcher/issues', null);
+        });
+        issuesRow.add_suffix(issuesButton);
+        issuesRow.set_activatable_widget(issuesButton);
+        linksGroup.add(issuesRow);
+
+        window.add(aboutPage);
 
         // Store labels for updating
         this._debugLabels = {
@@ -1153,28 +1145,28 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             nextEvent: nextEventLabel,
             nextEventType: nextEventTypeLabel,
             timeToNext: timeToNextLabel,
-            locationName: locationNameLabel,
+            calculationMethod: calculationMethodLabel,
+            locationName: debugLocationNameLabel,
             coordinates: coordinatesLabel,
             timezone: timezoneLabel,
+            // Today and Tomorrow solar events with their expanders
+            todayExpander: todayExpander,
+            tomorrowExpander: tomorrowExpander,
+            today: todayLabels,
+            tomorrow: tomorrowLabels,
             brightnessEnabled: brightnessEnabledLabel,
-            lightBrightnessInfo: lightBrightnessInfoLabel,
-            darkBrightnessInfo: darkBrightnessInfoLabel,
-            currentBrightness: currentBrightnessLabel,
-            brightnessTrend: brightnessTrendLabel,
             brightnessState: brightnessStateLabel,
             nextTransition: nextTransitionLabel,
         };
 
-        // Store the next event time for countdown calculation
+        this._monitorBrightnessContainer = monitorBrightnessContainer;
         this._nextEventTimestamp = null;
 
         // Update current time and countdown every second
         this._timeUpdateId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, DEBUG_TIME_UPDATE_INTERVAL_SECONDS, () => {
-            // Update current time
             const now = new Date();
             currentTimeLabel.set_label(now.toLocaleString());
 
-            // Update countdown if we have a next event time
             if (this._nextEventTimestamp) {
                 const secondsRemaining = Math.max(0, Math.round((this._nextEventTimestamp - now.getTime()) / MS_PER_SECOND));
                 const hours = Math.floor(secondsRemaining / 3600);
@@ -1195,62 +1187,221 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         // Initial update
         this._updateDebugInfo();
 
-        // Store signal handler IDs for cleanup
-        this._settingsSignalIds = [];
-
-        // Track settings signal connections for cleanup
-        const trackSignal = (signalId) => {
-            this._settingsSignalIds.push(signalId);
-            return signalId;
-        };
-
-        // Update the existing settings.connect calls to track signal IDs
-        // (Note: These were connected earlier in the code but not tracked)
-        // We'll disconnect them in the close-request handler below
-
-        // Clean up timers and references when window closes for proper garbage collection
+        // Clean up timers when window closes
         window.connect('close-request', () => {
-            // Clean up time update timer
-            try {
-                if (this._timeUpdateId) {
-                    GLib.source_remove(this._timeUpdateId);
-                    this._timeUpdateId = null;
+            // Remove timers
+            if (this._timeUpdateId) {
+                GLib.source_remove(this._timeUpdateId);
+                this._timeUpdateId = null;
+            }
+
+            if (this._debugRefreshId) {
+                GLib.source_remove(this._debugRefreshId);
+                this._debugRefreshId = null;
+            }
+
+            // Abort any in-flight location request
+            if (this._locationSession) {
+                this._locationSession.abort();
+                this._locationSession = null;
+            }
+
+            // Disconnect all settings signals before nulling settings
+            if (this._settingsSignalIds && this.settings) {
+                for (const signalId of this._settingsSignalIds) {
+                    this.settings.disconnect(signalId);
                 }
-            } catch (e) {
-                console.error(`Failed to remove time update timer: ${e}`);
+                this._settingsSignalIds = null;
             }
 
-            // Clean up debug refresh timer
-            try {
-                if (this._debugRefreshId) {
-                    GLib.source_remove(this._debugRefreshId);
-                    this._debugRefreshId = null;
-                }
-            } catch (e) {
-                console.error(`Failed to remove debug refresh timer: ${e}`);
-            }
-
-            // Disconnect all settings signal handlers
-            // Note: GSettings signal handlers should be disconnected, but they're created
-            // throughout the code without tracking. While not critical for prefs (which
-            // is short-lived), it's good practice to clean up properly.
-            // For now, we'll just null out the settings reference.
-            try {
-                this.settings = null;
-            } catch (e) {
-                console.error(`Failed to null settings: ${e}`);
-            }
-
-            // Clear widget references to allow garbage collection
-            try {
-                this._debugLabels = null;
-                this._nextEventTimestamp = null;
-            } catch (e) {
-                console.error(`Failed to clear widget references: ${e}`);
-            }
+            // Clear references
+            this.settings = null;
+            this._debugLabels = null;
+            this._nextEventTimestamp = null;
+            this._monitorBrightnessContainer = null;
 
             return false;
         });
+    }
+
+    _getLocationSubtitle() {
+        const lat = this.settings.get_string('manual-latitude');
+        const lng = this.settings.get_string('manual-longitude');
+        const name = this.settings.get_string('location-name');
+
+        if (lat && lng) {
+            return name ? name : `${lat}, ${lng}`;
+        }
+        return 'Not configured - using custom times';
+    }
+
+    _autoDetectLocation(button, spinner, latEntry, lngEntry, autoDetectRow, expander) {
+        button.sensitive = false;
+        spinner.visible = true;
+        spinner.start();
+
+        // Store session for cleanup on window close
+        this._locationSession = new Soup.Session();
+        const locMessage = Soup.Message.new('GET', 'https://ipinfo.io/loc');
+
+        // Use callback pattern for Soup in prefs.js environment
+        this._locationSession.send_and_read_async(
+            locMessage,
+            GLib.PRIORITY_DEFAULT,
+            null,
+            (_sess, result) => {
+                try {
+                    const bytes = this._locationSession.send_and_read_finish(result);
+                    const statusCode = locMessage.get_status();
+
+                    if (statusCode === 429) {
+                        throw new Error('Rate limit exceeded. Please try again tomorrow or enter coordinates manually.');
+                    }
+
+                    if (statusCode !== 200) {
+                        throw new Error(`Location service returned error ${statusCode}`);
+                    }
+
+                    const locData = new TextDecoder().decode(bytes.get_data()).trim();
+
+                    if (!locData || !locData.includes(',')) {
+                        throw new Error('Invalid location data received');
+                    }
+
+                    const [latitude, longitude] = locData.split(',');
+
+                    // Step 2: Get location name from OpenStreetMap
+                    this._reverseGeocode(this._locationSession, latitude, longitude, (locationName) => {
+                        // Update UI
+                        latEntry.set_text(latitude);
+                        lngEntry.set_text(longitude);
+
+                        // Show detected location in the auto-detect row subtitle
+                        autoDetectRow.set_subtitle(locationName);
+                        this.settings.set_string('location-name', locationName);
+
+                        // Update expander subtitle
+                        expander.set_subtitle(locationName);
+
+                        console.log(`Prefs: Auto-detected location: ${locationName} (${latitude}, ${longitude})`);
+
+                        spinner.stop();
+                        spinner.visible = false;
+                        button.sensitive = true;
+                    });
+
+                } catch (e) {
+                    console.error(`Prefs: Auto-detect location failed: ${e.message}`);
+                    this._showLocationError(button, e.message);
+                    spinner.stop();
+                    spinner.visible = false;
+                    button.sensitive = true;
+                }
+            }
+        );
+    }
+
+    _reverseGeocode(session, latitude, longitude, callback) {
+        const geoUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`;
+        const geoMessage = Soup.Message.new('GET', geoUrl);
+        geoMessage.request_headers.append('User-Agent', 'GNOME-Auto-Theme-Switcher/1.0');
+
+        session.send_and_read_async(
+            geoMessage,
+            GLib.PRIORITY_DEFAULT,
+            null,
+            (_sess, result) => {
+                let locationName = 'Location detected';
+                try {
+                    const bytes = session.send_and_read_finish(result);
+                    const geoData = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+
+                    if (geoData.address) {
+                        const parts = [];
+                        if (geoData.address.city) parts.push(geoData.address.city);
+                        else if (geoData.address.town) parts.push(geoData.address.town);
+                        else if (geoData.address.village) parts.push(geoData.address.village);
+
+                        if (geoData.address.state) parts.push(geoData.address.state);
+                        if (geoData.address.country) parts.push(geoData.address.country);
+
+                        locationName = parts.join(', ') || 'Location detected';
+                    }
+                } catch (geoError) {
+                    console.warn(`Prefs: Reverse geocoding failed: ${geoError.message}`);
+                }
+                callback(locationName);
+            }
+        );
+    }
+
+    _showLocationError(button, message) {
+        const dialog = new Adw.MessageDialog({
+            heading: 'Location Detection Failed',
+            body: message || 'Unable to detect your location. Please enter coordinates manually.',
+            modal: true,
+            transient_for: button.get_root(),
+        });
+        dialog.add_response('ok', 'OK');
+        dialog.present();
+    }
+
+    _updateMonitorBrightnessList(monitors) {
+        if (!this._monitorBrightnessContainer) {
+            return;
+        }
+
+        let child;
+        while ((child = this._monitorBrightnessContainer.get_first_child())) {
+            this._monitorBrightnessContainer.remove(child);
+        }
+
+        if (!monitors || monitors.length === 0) {
+            const noMonitorsLabel = new Gtk.Label({
+                label: 'No monitors configured',
+                xalign: 0,
+                margin_top: 6,
+                margin_bottom: 6,
+                margin_start: 12,
+                margin_end: 12,
+            });
+            noMonitorsLabel.add_css_class('dim-label');
+            this._monitorBrightnessContainer.append(noMonitorsLabel);
+            return;
+        }
+
+        for (let i = 0; i < monitors.length; i++) {
+            const monitor = monitors[i];
+
+            const monitorBox = new Gtk.Box({
+                orientation: Gtk.Orientation.VERTICAL,
+                spacing: 4,
+                margin_top: i === 0 ? 6 : 12,
+                margin_bottom: i === monitors.length - 1 ? 6 : 0,
+                margin_start: 12,
+                margin_end: 12,
+            });
+
+            const nameLabel = new Gtk.Label({
+                label: monitor.name || 'Unknown Monitor',
+                xalign: 0,
+                wrap: true,
+            });
+            nameLabel.add_css_class('heading');
+
+            const brightnessText = `Light: ${monitor.lightBrightness || 'N/A'}, Dark: ${monitor.darkBrightness || 'N/A'}, Current: ${monitor.currentBrightness || 'N/A'}`;
+            const brightnessLabel = new Gtk.Label({
+                label: brightnessText,
+                xalign: 0,
+                wrap: true,
+            });
+            brightnessLabel.add_css_class('dim-label');
+
+            monitorBox.append(nameLabel);
+            monitorBox.append(brightnessLabel);
+
+            this._monitorBrightnessContainer.append(monitorBox);
+        }
     }
 
     _updateDebugInfo() {
@@ -1263,15 +1414,13 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
                 this._debugLabels.darkTime.set_label(debugInfo.darkTime || 'N/A');
                 this._debugLabels.nextEvent.set_label(debugInfo.nextEventTime || 'N/A');
                 this._debugLabels.nextEventType.set_label(debugInfo.nextEventType || 'N/A');
+                this._debugLabels.calculationMethod.set_label(debugInfo.calculationMethod || 'N/A');
 
-                // Store the timestamp for countdown calculation
                 if (debugInfo.secondsToNextEvent) {
-                    // Calculate the timestamp based on current time + seconds remaining
                     const now = new Date();
                     this._nextEventTimestamp = now.getTime() + (debugInfo.secondsToNextEvent * MS_PER_SECOND);
                 }
 
-                // Initial countdown display (will be updated every second)
                 const seconds = debugInfo.secondsToNextEvent || 0;
                 const hours = Math.floor(seconds / 3600);
                 const minutes = Math.floor((seconds % 3600) / 60);
@@ -1279,32 +1428,66 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
                 this._debugLabels.timeToNext.set_label(`${hours}h ${minutes}m ${secs}s`);
 
                 // Location information
-                this._debugLabels.locationName.set_label(debugInfo.locationName || 'Unknown');
+                this._debugLabels.locationName.set_label(debugInfo.locationName || 'Not set');
 
-                if (debugInfo.latitude && debugInfo.longitude) {
+                if (debugInfo.latitude && debugInfo.longitude &&
+                    debugInfo.latitude !== 'Not set' && debugInfo.longitude !== 'Not set') {
                     this._debugLabels.coordinates.set_label(`${debugInfo.latitude}, ${debugInfo.longitude}`);
+                } else {
+                    this._debugLabels.coordinates.set_label('Not set');
                 }
 
-                if (debugInfo.apiData && debugInfo.apiData.timezone) {
-                    this._debugLabels.timezone.set_label(debugInfo.apiData.timezone);
-                }
+                this._debugLabels.timezone.set_label(debugInfo.timezone || 'N/A');
+
+                // Helper to update solar times for a day
+                const updateSolarTimes = (solarData, labels, expander, defaultTitle) => {
+                    if (solarData) {
+                        // Update expander title with date
+                        expander.set_title(`${defaultTitle} — ${solarData.date}`);
+                        expander.set_subtitle(`Sunrise: ${solarData.sunrise}, Sunset: ${solarData.sunset}`);
+
+                        // Update all event labels
+                        labels.firstLight.set_label(solarData.firstLight || 'N/A');
+                        labels.nauticalDawn.set_label(solarData.nauticalDawn || 'N/A');
+                        labels.dawn.set_label(solarData.dawn || 'N/A');
+                        labels.sunrise.set_label(solarData.sunrise || 'N/A');
+                        labels.sunriseEnd.set_label(solarData.sunriseEnd || 'N/A');
+                        labels.goldenHourEnd.set_label(solarData.goldenHourEnd || 'N/A');
+                        labels.solarNoon.set_label(solarData.solarNoon || 'N/A');
+                        labels.goldenHour.set_label(solarData.goldenHour || 'N/A');
+                        labels.sunsetStart.set_label(solarData.sunsetStart || 'N/A');
+                        labels.sunset.set_label(solarData.sunset || 'N/A');
+                        labels.dusk.set_label(solarData.dusk || 'N/A');
+                        labels.nauticalDusk.set_label(solarData.nauticalDusk || 'N/A');
+                        labels.lastLight.set_label(solarData.lastLight || 'N/A');
+                    } else {
+                        expander.set_title(defaultTitle);
+                        expander.set_subtitle('No coordinates set');
+                        const noCoords = 'N/A';
+                        Object.values(labels).forEach(label => label.set_label(noCoords));
+                    }
+                };
+
+                // Update Today's solar times
+                updateSolarTimes(
+                    debugInfo.solarTimesToday,
+                    this._debugLabels.today,
+                    this._debugLabels.todayExpander,
+                    'Today'
+                );
+
+                // Update Tomorrow's solar times
+                updateSolarTimes(
+                    debugInfo.solarTimesTomorrow,
+                    this._debugLabels.tomorrow,
+                    this._debugLabels.tomorrowExpander,
+                    'Tomorrow'
+                );
 
                 // Brightness information
                 if (debugInfo.brightness) {
                     this._debugLabels.brightnessEnabled.set_label(
                         debugInfo.brightness.enabled ? 'Enabled' : 'Disabled'
-                    );
-                    this._debugLabels.lightBrightnessInfo.set_label(
-                        debugInfo.brightness.lightBrightness || 'N/A'
-                    );
-                    this._debugLabels.darkBrightnessInfo.set_label(
-                        debugInfo.brightness.darkBrightness || 'N/A'
-                    );
-                    this._debugLabels.currentBrightness.set_label(
-                        debugInfo.brightness.currentBrightness || 'N/A'
-                    );
-                    this._debugLabels.brightnessTrend.set_label(
-                        debugInfo.brightness.trend || 'N/A'
                     );
                     this._debugLabels.brightnessState.set_label(
                         debugInfo.brightness.brightnessState || 'N/A'
@@ -1312,6 +1495,8 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
                     this._debugLabels.nextTransition.set_label(
                         debugInfo.brightness.nextTransition || 'N/A'
                     );
+
+                    this._updateMonitorBrightnessList(debugInfo.brightness.monitors || []);
                 }
             }
         } catch (e) {
@@ -1372,43 +1557,15 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         }
     }
 
-    _checkBrightnessctl() {
+    async _checkBrightnessctl() {
         try {
-            const [success, stdout, stderr, exitStatus] = GLib.spawn_command_line_sync('which brightnessctl');
-            return exitStatus === 0;
+            const path = GLib.find_program_in_path('brightnessctl');
+            const result = path !== null;
+            console.log(`Prefs: brightnessctl check result: ${result} (path: ${path})`);
+            return result;
         } catch (e) {
+            console.log(`Prefs: brightnessctl check failed: ${e.message}`);
             return false;
         }
     }
-
-    _initializeBrightnessValues(lightScale, darkScale) {
-        // Get current brightness and set both sliders to that value on first run
-        try {
-            const [success, stdout] = GLib.spawn_command_line_sync('brightnessctl get');
-            if (success) {
-                const currentBrightness = parseInt(new TextDecoder().decode(stdout).trim());
-
-                // Get max brightness
-                const [maxSuccess, maxStdout] = GLib.spawn_command_line_sync('brightnessctl max');
-                if (maxSuccess) {
-                    const maxBrightness = parseInt(new TextDecoder().decode(maxStdout).trim());
-                    const currentPercent = Math.round((currentBrightness / maxBrightness) * 100);
-
-                    // If settings are at defaults (100 and 50), set both to current
-                    const lightBrightness = this.settings.get_int('light-brightness');
-                    const darkBrightness = this.settings.get_int('dark-brightness');
-
-                    if (lightBrightness === 100 && darkBrightness === 50) {
-                        lightScale.set_value(currentPercent);
-                        darkScale.set_value(currentPercent);
-                        this.settings.set_int('light-brightness', currentPercent);
-                        this.settings.set_int('dark-brightness', currentPercent);
-                    }
-                }
-            }
-        } catch (e) {
-            console.error(`Failed to get current brightness: ${e}`);
-        }
-    }
 }
-
