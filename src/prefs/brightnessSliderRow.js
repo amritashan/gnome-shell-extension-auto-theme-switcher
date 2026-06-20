@@ -11,7 +11,53 @@ import GLib from 'gi://GLib';
  * - Automatic restore: original brightness is restored when slider is released
  * - Toast notifications: shows monitor-specific preview and restore messages
  *
- * Works with any DisplayController implementation (brightnessctl, ddcutil, etc.)
+ * Works with any DisplayController implementation (brightnessctl, ddcutil,
+ * Mutter backlight, gnome-settings-daemon Power d-bus, etc.)
+ *
+ * ──────────────────────────────────────────────────────────────────────────
+ * STALE-WRITE BUG WARNING — read before refactoring
+ * ──────────────────────────────────────────────────────────────────────────
+ * Every backend's setBrightness is async and slow (ddcutil can take seconds).
+ * If multiple writes are issued during a drag without serialization, they can
+ * complete out of order and the last one to land — possibly a stale value
+ * issued during the drag — overwrites the restore. The screen is then stuck
+ * at a preview brightness even though the slider was released.
+ *
+ * Four invariants prevent that, and refactors must preserve all four:
+ *
+ *   1. AT MOST ONE setBrightness IN FLIGHT.
+ *      `brightnessInFlight` + `latestDesiredBrightness` form a "latest wins"
+ *      queue (see _processNextBrightness). Never call setBrightness in
+ *      parallel — newer slider values must overwrite the queued value, not
+ *      spawn a second concurrent write.
+ *
+ *   2. RESTORE AWAITS IN-FLIGHT WRITES.
+ *      _restoreOriginalBrightness clears latestDesiredBrightness, then
+ *      `await`s `lastPreviewPromise` BEFORE issuing the restore call. If a
+ *      future change moves the restore call earlier, a preview write can land
+ *      after it and re-corrupt the screen.
+ *
+ *   3. ONE displayController INSTANCE PER SLIDER FOR ITS WHOLE LIFETIME.
+ *      The in-flight promise tracking is per-instance. If you later swap to
+ *      probing/dispatching controllers (e.g. via BrightnessController's
+ *      _probeController) for slider previews too, you MUST resolve the
+ *      controller once at construction and reuse it — don't re-probe per
+ *      drag, and don't replace the controller mid-preview.
+ *
+ *   4. ORIGINAL CAPTURE COMPLETES BEFORE ANY PREVIEW WRITE.
+ *      _processNextBrightness `await`s `brightnessQueryPromise` before issuing
+ *      the first setBrightness. Without this gate, getBrightness and our own
+ *      setBrightness can race on the same hardware channel (ddcutil's i2c/VCP,
+ *      brightnessctl's sysfs) and the read can return our own preview write
+ *      as the "original". The slider then restores to the preview value and
+ *      the user is stuck at it. DO NOT reintroduce a `_previewStarted`-style
+ *      flag that lets the .then run before the query finishes — serialize
+ *      properly instead.
+ *
+ * Symptoms of regression: drop the slider thumb, screen stays at the preview
+ * brightness; or screen flickers between values for a second or two after
+ * release. If you see those, you've broken one of the four invariants above.
+ * ──────────────────────────────────────────────────────────────────────────
  */
 export class BrightnessSliderRow {
     /**
@@ -195,27 +241,22 @@ export class BrightnessSliderRow {
             console.log(`[BrightnessSliderRow] Thumb drag detected, current value: ${fallbackValue}%`);
         }
 
-        this._previewStarted = false; // Track if we've applied any preview updates
-
-        // Query the actual current SYSTEM brightness (not the slider's configured value)
-        // This is async, so we start the query immediately when the user starts dragging
-        // Store the promise so _onPreviewEnd can await it if needed (important for slow ddcutil calls)
+        // Query the actual current SYSTEM brightness (not the slider's configured value).
+        // _processNextBrightness gates on this promise so getBrightness ALWAYS completes
+        // before our first setBrightness hits the hardware — no race on the i2c/VCP bus,
+        // no risk of reading back our own preview write as the "original".
         console.log(`[BrightnessSliderRow] Querying current system brightness...`);
         this.brightnessQueryPromise = this.displayController.getBrightness().then(currentBrightness => {
-            // Only use the queried value if we haven't started previewing yet
-            // If preview has started, the system brightness may already be changed
-            if (!this._previewStarted && currentBrightness !== null) {
+            if (currentBrightness !== null) {
                 this.originalBrightness = currentBrightness;
                 console.log(`[BrightnessSliderRow] Saved original system brightness: ${this.originalBrightness}%`);
             } else {
-                // Use the tracked pre-interaction value
                 this.originalBrightness = fallbackValue;
-                console.log(`[BrightnessSliderRow] Using tracked pre-interaction value: ${this.originalBrightness}%`);
+                console.log(`[BrightnessSliderRow] getBrightness returned null, using tracked pre-interaction value: ${this.originalBrightness}%`);
             }
             return this.originalBrightness;
         }).catch(e => {
             console.error(`[BrightnessSliderRow] Failed to get current brightness: ${e}`);
-            // Fallback to tracked pre-interaction value
             this.originalBrightness = fallbackValue;
             console.log(`[BrightnessSliderRow] Fallback to tracked value: ${this.originalBrightness}%`);
             return this.originalBrightness;
@@ -303,10 +344,6 @@ export class BrightnessSliderRow {
         console.log(`[BrightnessSliderRow] Requesting preview brightness: ${value}% on ${this.monitorName}`);
         this.lastPreviewUpdate = Date.now();
 
-        // Mark that we've started previewing - this prevents the async getBrightness
-        // from overwriting originalBrightness with the preview value
-        this._previewStarted = true;
-
         // Always store the latest desired value
         this.latestDesiredBrightness = value;
 
@@ -337,6 +374,29 @@ export class BrightnessSliderRow {
             console.log(`[BrightnessSliderRow] Skipping preview apply - no longer grabbed`);
             this.latestDesiredBrightness = null;
             return;
+        }
+
+        // CRITICAL: wait for the original-brightness query to complete before issuing
+        // the FIRST preview write. On controllers that share a single hardware channel
+        // (ddcutil's i2c/VCP, brightnessctl's sysfs), running getBrightness and
+        // setBrightness in parallel can race — getBrightness may read back our own
+        // preview write as the "original", and the restore then sends the monitor to
+        // the preview value instead of its true pre-drag brightness.
+        //
+        // After the first await, brightnessQueryPromise is null (cleared by
+        // _restoreOriginalBrightness or by re-entry below), so subsequent ticks pay
+        // no overhead.
+        if (this.brightnessQueryPromise !== null) {
+            try {
+                await this.brightnessQueryPromise;
+            } catch (e) {
+                // The .then chain already converts failures into a fallback value, so
+                // this catch is just defensive — nothing to do here.
+            }
+            // Re-check guards: user may have released during the await.
+            if (!this.isGrabbed || this.latestDesiredBrightness === null) {
+                return;
+            }
         }
 
         // Take the current desired value and clear it
@@ -385,7 +445,6 @@ export class BrightnessSliderRow {
 
         this.isGrabbed = false;
         this.pendingPreviewValue = null;
-        this._previewStarted = false;
         this._recentNonPreviewChange = false;
         if (this._clearRecentChangeId) {
             GLib.Source.remove(this._clearRecentChangeId);
@@ -556,7 +615,6 @@ export class BrightnessSliderRow {
         this.lastPreviewPromise = null;
         this.brightnessInFlight = false;
         this.latestDesiredBrightness = null;
-        this._previewStarted = false;
         this._prevNonPreviewValue = null;
         this._currNonPreviewValue = null;
         this._recentNonPreviewChange = false;

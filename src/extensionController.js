@@ -18,7 +18,14 @@ export class ExtensionController {
         this._scheduleTimeoutId = null;
         this._resumeTimeoutId = null;
         this._debugInfo = null;
-        this._manualModeActive = false;
+        // Restore manual override state across extension reloads. Without this, any
+        // event that causes ExtensionController to be recreated (screen lock cycle,
+        // suspend/resume, GNOME Shell extension reload, settings hot-reload) would
+        // drop the user's "Apply Dark/Light" choice back into auto mode and the
+        // schedule would re-flip the theme. The flag is persisted by
+        // forceThemeSwitch / resetToAutomatic.
+        this._manualModeActive = this._settings.get_boolean('manual-mode-active');
+        this._manualModeIsDark = this._settings.get_boolean('manual-mode-is-dark');
         this._lightTime = null;
         this._darkTime = null;
         this._sessionModeSignalId = null;
@@ -52,6 +59,18 @@ export class ExtensionController {
 
         // Check for pending migration notifications
         this._showMigrationNotificationIfPending();
+
+        if (this._manualModeActive) {
+            // Restored from persisted settings — the user chose this mode in a previous
+            // session and hasn't reset to automatic. Apply the THEME but NOT the
+            // brightness — manual mode is "set-once-leave-alone", so any brightness
+            // the user has dialed in via the monitor's OSD (or anywhere else) since
+            // their last forceThemeSwitch click stays. The auto schedule does NOT
+            // start.
+            console.log(`ExtensionController: Restoring manual ${this._manualModeIsDark ? 'dark' : 'light'} mode (theme only, brightness preserved)`);
+            this._themeController.switchTheme(this._manualModeIsDark, false, true);
+            return;
+        }
 
         // Run the main logic loop
         this._scheduleNextChangeEvent();
@@ -126,10 +145,10 @@ export class ExtensionController {
             const parentMode = Main.sessionMode.parentMode;
 
             if (currentMode === 'user' || parentMode === 'user') {
-                // Fire-and-forget async brightness update
-                this._brightnessController.updateBrightness(false).catch(e => {
-                    console.error('ExtensionController: Failed to update brightness on session mode change:', e);
-                });
+                // Default: do NOT re-apply brightness in manual mode here. A lock/unlock
+                // doesn't change monitor hardware state, so re-pushing would just fight
+                // any OSD adjustment the user has made since their forceThemeSwitch click.
+                this._reapplyBrightnessForCurrentMode('session mode change');
             }
         });
     }
@@ -147,10 +166,7 @@ export class ExtensionController {
 
         this._screenSaverSignalId = this._screenSaverProxy.connectSignal('ActiveChanged', (_proxy, _sender, [isActive]) => {
             if (!isActive) {
-                // Fire-and-forget async brightness update
-                this._brightnessController.updateBrightness(false).catch(e => {
-                    console.error('ExtensionController: Failed to update brightness after screen unlock:', e);
-                });
+                this._reapplyBrightnessForCurrentMode('screen unlock');
             }
         });
     }
@@ -158,10 +174,54 @@ export class ExtensionController {
     _setupMonitorsChangedHandler() {
         const monitorManager = global.backend.get_monitor_manager();
         this._monitorsChangedId = monitorManager.connect('monitors-changed', () => {
-            console.log('ExtensionController: Monitors changed, re-applying brightness');
-            this._brightnessController.updateBrightness(true).catch(e => {
-                console.error('ExtensionController: Failed to update brightness after monitors changed:', e);
-            });
+            // Hotplugged monitors may have lost their DDC state, so we DO want to
+            // push the brightness target even in manual mode. The cache in
+            // applyManualBrightness will still skip if the value matches what we
+            // last wrote.
+            this._reapplyBrightnessForCurrentMode('monitors changed', { reapplyOnManual: true });
+        });
+    }
+
+    /**
+     * Single entry point for brightness re-application from event handlers
+     * (session mode change, screen unlock, monitors-changed).
+     *
+     * Manual-mode policy:
+     *   - reapplyOnManual=true (monitors-changed only): push the manual brightness
+     *     target. The cache in applyManualBrightness then skips redundant writes.
+     *   - reapplyOnManual=false (lock/unlock, screen-saver): do nothing. Manual mode
+     *     is set-once-leave-alone — the user's OSD adjustments (if any) survive.
+     *
+     * Auto-mode policy: delegate to BrightnessController with `allowStatic` gated
+     * on whether we're inside a transition window (the loop owns updates inside).
+     *
+     * @param {string} reason - human-readable trigger for logs
+     * @param {Object} [options]
+     * @param {boolean} [options.reapplyOnManual=false] - if true, push manual
+     *     brightness target on this event; if false, leave brightness alone in
+     *     manual mode.
+     * @private
+     */
+    _reapplyBrightnessForCurrentMode(reason, { reapplyOnManual = false } = {}) {
+        if (this._manualModeActive) {
+            if (reapplyOnManual) {
+                console.log(`ExtensionController: ${reason} — re-applying manual ${this._manualModeIsDark ? 'dark' : 'light'} brightness`);
+                this._brightnessController.applyManualBrightness(this._manualModeIsDark).catch(e => {
+                    console.error(`ExtensionController: Failed to re-apply manual brightness after ${reason}:`, e);
+                });
+            } else {
+                console.log(`ExtensionController: ${reason} — leaving brightness alone (manual mode, set-once-leave-alone)`);
+            }
+            return;
+        }
+
+        // Auto mode: only allow the static fallback OUTSIDE a transition window.
+        // Inside a transition, the brightness loop owns updates — fighting it would
+        // resurrect the "brightness snaps to lightBrightness every few minutes" bug.
+        const allowStatic = !this._brightnessController.isInTransitionWindow();
+        console.log(`ExtensionController: ${reason} — auto re-applying brightness (allowStatic=${allowStatic})`);
+        this._brightnessController.updateBrightness(allowStatic).catch(e => {
+            console.error(`ExtensionController: Failed to update brightness after ${reason}:`, e);
         });
     }
 
@@ -193,18 +253,50 @@ export class ExtensionController {
     }
 
     getDebugInfo() {
-        // Return the existing debug info without overwriting it
-        // The debug info is populated by _scheduleNextChangeEvent() with correct solar times
-        return JSON.stringify(this._debugInfo || {});
+        // Snapshot the stored info and inject manual-mode state so the prefs UI can
+        // pause its countdown and show "Manual override active" instead of stale auto
+        // schedule values. Spreading into a new object so we don't mutate _debugInfo.
+        const info = { ...(this._debugInfo || {}) };
+        info.manualModeActive = this._manualModeActive;
+        info.manualModeIsDark = this._manualModeIsDark;
+        return JSON.stringify(info);
     }
 
     forceThemeSwitch(isDark) {
         this._manualModeActive = true;
+        this._manualModeIsDark = isDark;
+        // Persist so the override survives extension reloads (lock cycle,
+        // suspend/resume, etc.) — otherwise the next ExtensionController instance
+        // would start with manual mode off and the auto schedule would re-flip.
+        this._settings.set_boolean('manual-mode-active', true);
+        this._settings.set_boolean('manual-mode-is-dark', isDark);
+
+        // Cancel the auto schedule timer — otherwise it'll fire at the next solar
+        // event boundary and re-run switchTheme/_scheduleNextChangeEvent, fighting
+        // the user's manual choice. The schedule timer's callback ALSO defensively
+        // checks _manualModeActive in case this cancellation is missed for any reason.
+        if (this._scheduleTimeoutId) {
+            GLib.source_remove(this._scheduleTimeoutId);
+            this._scheduleTimeoutId = null;
+        }
+
         this._themeController.switchTheme(isDark, false, true);
+
+        // Apply the chosen mode's brightness immediately. Without this, the brightness
+        // stays at whatever the auto schedule left it at — usually wrong for the new
+        // mode (e.g., user forces Dark while screen is at lightBrightness).
+        this._brightnessController.applyManualBrightness(isDark).catch(e => {
+            console.error('ExtensionController: Failed to apply manual brightness:', e);
+        });
     }
 
     resetToAutomatic() {
         this._manualModeActive = false;
+        this._manualModeIsDark = false;
+        this._settings.set_boolean('manual-mode-active', false);
+        this._settings.set_boolean('manual-mode-is-dark', false);
+        // _scheduleNextChangeEvent re-establishes both the schedule timer and the
+        // brightness loop based on current `now`, so all auto behavior resumes.
         this._scheduleNextChangeEvent();
     }
 
@@ -285,6 +377,17 @@ export class ExtensionController {
     }
 
     _scheduleNextChangeEvent() {
+        // Manual mode is authoritative. Don't recompute the schedule, don't switch
+        // themes, don't apply time-based brightness. resetToAutomatic clears the
+        // flag before calling this, so the only way through is when the user has
+        // explicitly returned to auto. This is a defense-in-depth backstop on top
+        // of the per-caller guards (settings listeners, suspend handler, schedule
+        // timer callback) — if any future caller is added, the flag still wins.
+        if (this._manualModeActive) {
+            console.log('ExtensionController: skipping _scheduleNextChangeEvent — manual mode is active');
+            return;
+        }
+
         // Clear existing schedule timeout
         if (this._scheduleTimeoutId) {
             GLib.source_remove(this._scheduleTimeoutId);
@@ -384,6 +487,15 @@ export class ExtensionController {
         this._debugInfo.nextEventType = switchToDark ? 'dark' : 'light';
 
         this._scheduleTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secondsToNextEvent, () => {
+            // Defensive: if we entered manual mode after this timer was scheduled
+            // (and somehow the cancellation in forceThemeSwitch didn't catch it),
+            // do nothing here. The user's manual choice is authoritative;
+            // resetToAutomatic re-establishes the schedule when they want it back.
+            if (this._manualModeActive) {
+                this._scheduleTimeoutId = null;
+                return GLib.SOURCE_REMOVE;
+            }
+
             this._themeController.switchTheme(switchToDark, true, this._manualModeActive);
             // Apply brightness at theme switch time (this is the END of a transition, not during)
             // At switch time, we should apply the target brightness (light or dark)

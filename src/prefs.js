@@ -83,6 +83,40 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             icon_name: 'preferences-system-symbolic',
         });
 
+        // --- Manual Override banner (shown only while manual mode is active) ---
+        // Pinned at the TOP of the Settings page so the user can see at a glance
+        // that the auto schedule is paused and reset from any tab without
+        // having to navigate to the Status tab. Visibility is bound to the
+        // manual-mode-active GSettings key so it tracks both prefs button
+        // clicks and the persisted state across extension reloads.
+        const overrideGroup = new Adw.PreferencesGroup({ title: '⚠️ Manual Override is On' });
+        const overrideRow = new Adw.ActionRow({
+            subtitle: 'Click Reset to follow the day/night schedule again.',
+        });
+        const overrideResetButton = new Gtk.Button({
+            label: 'Reset',
+            valign: Gtk.Align.CENTER,
+        });
+        overrideResetButton.add_css_class('suggested-action');
+        overrideResetButton.connect('clicked', () => {
+            this._callExtensionMethod('resetToAutomatic', []);
+        });
+        overrideRow.add_suffix(overrideResetButton);
+        overrideGroup.add(overrideRow);
+        page.add(overrideGroup);
+
+        const updateOverrideVisibility = () => {
+            const active = this.settings.get_boolean('manual-mode-active');
+            overrideGroup.set_visible(active);
+            if (active) {
+                const isDark = this.settings.get_boolean('manual-mode-is-dark');
+                overrideRow.set_title(`Override set to ${isDark ? 'Dark' : 'Light'} mode`);
+            }
+        };
+        updateOverrideVisibility();
+        this._settingsSignalIds.push(this.settings.connect('changed::manual-mode-active', updateOverrideVisibility));
+        this._settingsSignalIds.push(this.settings.connect('changed::manual-mode-is-dark', updateOverrideVisibility));
+
         // --- Theme Settings Group ---
         const themeGroup = new Adw.PreferencesGroup({ title: 'Theme Settings' });
         page.add(themeGroup);
@@ -813,13 +847,13 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
 
         window.add(page);
 
-        // --- Debug Panel Page ---
+        // --- Status Page ---
         const debugPage = new Adw.PreferencesPage({
-            title: 'Debug',
+            title: 'Status',
             icon_name: 'dialog-information-symbolic',
         });
 
-        const debugGroup = new Adw.PreferencesGroup({ title: 'Debug Information' });
+        const debugGroup = new Adw.PreferencesGroup({ title: 'Schedule Status' });
         debugPage.add(debugGroup);
 
         // Info display rows
@@ -968,8 +1002,8 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         nextTransitionRow.add_suffix(nextTransitionLabel);
         brightnessDetailsExpander.add_row(nextTransitionRow);
 
-        // Test controls
-        const testGroup = new Adw.PreferencesGroup({ title: 'Manual Testing' });
+        // Manual override controls
+        const testGroup = new Adw.PreferencesGroup({ title: 'Manual Override' });
         debugPage.add(testGroup);
 
         const darkTestRow = new Adw.ActionRow({
@@ -982,6 +1016,7 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         });
         darkTestButton.connect('clicked', () => {
             this._callExtensionMethod('forceThemeSwitch', [true]);
+            this._updateDebugInfo();
         });
         darkTestRow.add_suffix(darkTestButton);
         testGroup.add(darkTestRow);
@@ -996,6 +1031,7 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         });
         lightTestButton.connect('clicked', () => {
             this._callExtensionMethod('forceThemeSwitch', [false]);
+            this._updateDebugInfo();
         });
         lightTestRow.add_suffix(lightTestButton);
         testGroup.add(lightTestRow);
@@ -1011,13 +1047,14 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         resetButton.add_css_class('suggested-action');
         resetButton.connect('clicked', () => {
             this._callExtensionMethod('resetToAutomatic', []);
+            this._updateDebugInfo();
         });
         resetRow.add_suffix(resetButton);
         testGroup.add(resetRow);
 
         const refreshRow = new Adw.ActionRow({
-            title: 'Refresh Debug Info',
-            subtitle: 'Update debug information display',
+            title: 'Refresh Status',
+            subtitle: 'Update displayed values now',
         });
         const refreshButton = new Gtk.Button({
             label: 'Refresh',
@@ -1408,24 +1445,38 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         try {
             const debugInfo = this._getExtensionDebugInfo();
             if (debugInfo && this._debugLabels) {
-                this._debugLabels.currentMode.set_label(debugInfo.currentMode || 'N/A');
                 this._debugLabels.currentTime.set_label(debugInfo.currentTime || 'N/A');
                 this._debugLabels.lightTime.set_label(debugInfo.lightTime || 'N/A');
                 this._debugLabels.darkTime.set_label(debugInfo.darkTime || 'N/A');
-                this._debugLabels.nextEvent.set_label(debugInfo.nextEventTime || 'N/A');
-                this._debugLabels.nextEventType.set_label(debugInfo.nextEventType || 'N/A');
                 this._debugLabels.calculationMethod.set_label(debugInfo.calculationMethod || 'N/A');
 
-                if (debugInfo.secondsToNextEvent) {
-                    const now = new Date();
-                    this._nextEventTimestamp = now.getTime() + (debugInfo.secondsToNextEvent * MS_PER_SECOND);
-                }
+                if (debugInfo.manualModeActive) {
+                    // Manual override: pause the countdown and replace schedule labels
+                    // with explicit indicators. The auto schedule is suspended and the
+                    // user has chosen the mode explicitly — showing a stale countdown
+                    // would be misleading.
+                    const chosen = debugInfo.manualModeIsDark ? 'Dark' : 'Light';
+                    this._debugLabels.currentMode.set_label(`${chosen} mode (manual)`);
+                    this._debugLabels.nextEvent.set_label('Off until reset');
+                    this._debugLabels.nextEventType.set_label('Off until reset');
+                    this._debugLabels.timeToNext.set_label('Off until reset');
+                    this._nextEventTimestamp = null; // halt the per-second decrement
+                } else {
+                    this._debugLabels.currentMode.set_label(debugInfo.currentMode || 'N/A');
+                    this._debugLabels.nextEvent.set_label(debugInfo.nextEventTime || 'N/A');
+                    this._debugLabels.nextEventType.set_label(debugInfo.nextEventType || 'N/A');
 
-                const seconds = debugInfo.secondsToNextEvent || 0;
-                const hours = Math.floor(seconds / 3600);
-                const minutes = Math.floor((seconds % 3600) / 60);
-                const secs = seconds % 60;
-                this._debugLabels.timeToNext.set_label(`${hours}h ${minutes}m ${secs}s`);
+                    if (debugInfo.secondsToNextEvent) {
+                        const now = new Date();
+                        this._nextEventTimestamp = now.getTime() + (debugInfo.secondsToNextEvent * MS_PER_SECOND);
+                    }
+
+                    const seconds = debugInfo.secondsToNextEvent || 0;
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.floor((seconds % 3600) / 60);
+                    const secs = seconds % 60;
+                    this._debugLabels.timeToNext.set_label(`${hours}h ${minutes}m ${secs}s`);
+                }
 
                 // Location information
                 this._debugLabels.locationName.set_label(debugInfo.locationName || 'Not set');

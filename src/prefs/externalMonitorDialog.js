@@ -2,7 +2,7 @@ import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import GLib from 'gi://GLib';
 import { DisplayManager } from './displayManager.js';
-import { DdcutilDisplay, BrightnessCtlDisplay } from '../displayController.js';
+import { DdcutilDisplay, probeDisplayController } from '../displayController.js';
 import { BrightnessSliderRow } from './brightnessSliderRow.js';
 import { BRIGHTNESS_TRANSITION_DURATIONS } from '../constants.js';
 
@@ -970,16 +970,12 @@ export class MonitorConfigDialog {
      * @param {Object} monitor - Monitor object
      * @private
      */
-    _addBrightnessControlsToListBox(listBox, monitor) {
-        // Create appropriate display controller based on monitor type
-        let controller;
-        if (monitor.type === 'brightnessctl') {
-            controller = new BrightnessCtlDisplay(this.settings);
-            console.log(`[MonitorConfigDialog] Created BrightnessCtlDisplay controller for ${monitor.name}`);
-        } else {
-            controller = new DdcutilDisplay(monitor, this.settings);
-            console.log(`[MonitorConfigDialog] Created DdcutilDisplay controller for ${monitor.name}`);
-        }
+    async _addBrightnessControlsToListBox(listBox, monitor) {
+        // Probe once for the best backend (Mutter / SettingsDaemon d-bus / brightnessctl /
+        // ddcutil). The resolved controller is then reused for both sliders below — see
+        // the "ONE displayController INSTANCE PER SLIDER FOR ITS WHOLE LIFETIME" invariant
+        // in brightnessSliderRow.js.
+        const controller = await probeDisplayController(monitor, this.settings);
 
         // Light mode brightness slider
         const lightSlider = new BrightnessSliderRow(
@@ -1072,16 +1068,9 @@ export class MonitorConfigDialog {
      * @param {Object} monitor - Monitor object
      * @private
      */
-    _addBrightnessControls(expanderRow, monitor) {
-        // Create appropriate display controller based on monitor type
-        let controller;
-        if (monitor.type === 'brightnessctl') {
-            controller = new BrightnessCtlDisplay(this.settings);
-            console.log(`[MonitorConfigDialog] Created BrightnessCtlDisplay controller for ${monitor.name}`);
-        } else {
-            controller = new DdcutilDisplay(monitor, this.settings);
-            console.log(`[MonitorConfigDialog] Created DdcutilDisplay controller for ${monitor.name}`);
-        }
+    async _addBrightnessControls(expanderRow, monitor) {
+        // Probe once for the best backend — see invariant note in brightnessSliderRow.js.
+        const controller = await probeDisplayController(monitor, this.settings);
 
         // Light mode brightness slider
         const lightSlider = new BrightnessSliderRow(
@@ -1181,14 +1170,8 @@ export class MonitorConfigDialog {
         this.toastOverlay.add_toast(toast);
 
         try {
-            // Create appropriate controller based on monitor type
-            console.log(`[MonitorConfigDialog] Creating controller for ${monitor.type}...`);
-            let controller;
-            if (monitor.type === 'brightnessctl') {
-                controller = new BrightnessCtlDisplay(this.settings);
-            } else {
-                controller = new DdcutilDisplay(monitor, this.settings);
-            }
+            console.log(`[MonitorConfigDialog] Probing controller for ${monitor.name}...`);
+            const controller = await probeDisplayController(monitor, this.settings);
 
             // Read current brightness
             console.log(`[MonitorConfigDialog] Calling getBrightness()...`);

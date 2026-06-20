@@ -194,5 +194,27 @@
       </description>
     </key>
 
+    <!-- Manual override persistence -->
+    <key name="manual-mode-active" type="b">
+      <default>false</default>
+      <summary>Manual override mode active</summary>
+      <description>
+        When true, the user has explicitly chosen a theme via the Manual Override
+        section in the prefs Status tab. The auto schedule and time-based brightness
+        loop are paused until the user clicks Reset. Persisted so the override
+        survives extension reloads (screen lock, suspend/resume, GNOME Shell reload).
+      </description>
+    </key>
+
+    <key name="manual-mode-is-dark" type="b">
+      <default>false</default>
+      <summary>Manual override chosen mode</summary>
+      <description>
+        When manual-mode-active is true, records whether the user chose dark (true)
+        or light (false). Used to re-apply the user's choice after extension reload
+        and on screen-unlock or monitor-hotplug events.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

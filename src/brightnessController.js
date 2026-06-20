@@ -5,12 +5,7 @@ import {
     MS_PER_SECOND,
     MS_PER_DAY
 } from './constants.js';
-import {
-    DdcutilDisplay,
-    BrightnessCtlDisplay,
-    MutterBacklightDisplay,
-    isMutterBacklightAvailable
-} from './displayController.js';
+import { probeDisplayController } from './displayController.js';
 
 export class BrightnessController {
     constructor(settings) {
@@ -19,16 +14,16 @@ export class BrightnessController {
         this._lastBrightnessUpdateTime = null;
         this._lightTime = null;
         this._darkTime = null;
-        this._controllerCache = new Map(); // Cache DisplayController instances
+        // Per-monitor cache: monitor.id -> Promise<DisplayController>.
+        // Storing promises lets concurrent probes for the same monitor share the result.
+        this._controllerCache = new Map();
 
-        // Check if native Mutter backlight API is available (GNOME 49+)
-        // This check is cached since it won't change during runtime
-        this._useMutterBacklight = isMutterBacklightAvailable();
-        if (this._useMutterBacklight) {
-            console.log('BrightnessController: Using native Mutter backlight API (GNOME 49+)');
-        } else {
-            console.log('BrightnessController: Using legacy brightness control (brightnessctl/ddcutil)');
-        }
+        // Per-monitor cache of the last brightness we successfully wrote, keyed by
+        // monitor.id. Used to skip redundant setBrightness calls — important for
+        // ddcutil monitors where each write is slow (~200-500ms) and persists to
+        // EEPROM (limited write cycles). Without this, every lock/unlock or
+        // monitors-changed event re-writes the same value.
+        this._lastAppliedBrightness = new Map();
 
         // Listen for monitor config changes to invalidate cache
         this._monitorsChangedId = this._settings.connect('changed::monitors', () => {
@@ -58,37 +53,19 @@ export class BrightnessController {
     }
 
     /**
-     * Get or create a DisplayController for a monitor.
-     * Controllers are cached for performance.
-     * On GNOME 49+, uses native Mutter backlight API for all monitors.
-     * On older versions, falls back to brightnessctl/ddcutil.
-     * @param {Object} monitor - Monitor object
-     * @returns {DisplayController} Controller instance
+     * Get a DisplayController for a monitor, probing once and caching the result.
+     * Backend selection is delegated to probeDisplayController() in
+     * displayController.js so the shell side and prefs side stay in sync.
+     *
+     * The cache stores Promise<DisplayController> so concurrent calls for the
+     * same monitor share a single probe rather than racing.
+     * @param {Object} monitor - Monitor object from settings
+     * @returns {Promise<DisplayController>} Resolved controller
      * @private
      */
     _getOrCreateController(monitor) {
         if (!this._controllerCache.has(monitor.id)) {
-            let controller;
-
-            if (this._useMutterBacklight) {
-                // GNOME 49+: Use native Mutter backlight API for all monitors
-                controller = new MutterBacklightDisplay({
-                    id: monitor.id,
-                    name: monitor.name,
-                    displayName: monitor.name // Use stored name to find monitor
-                }, this._settings);
-                console.log(`BrightnessController: Created Mutter controller for ${monitor.name}`);
-            } else if (monitor.type === 'brightnessctl') {
-                // Legacy: Built-in display via brightnessctl
-                controller = new BrightnessCtlDisplay(this._settings);
-                console.log(`BrightnessController: Created brightnessctl controller for ${monitor.name}`);
-            } else {
-                // Legacy: External monitor via ddcutil
-                controller = new DdcutilDisplay(monitor, this._settings);
-                console.log(`BrightnessController: Created ddcutil controller for ${monitor.name}`);
-            }
-
-            this._controllerCache.set(monitor.id, controller);
+            this._controllerCache.set(monitor.id, probeDisplayController(monitor, this._settings));
         }
         return this._controllerCache.get(monitor.id);
     }
@@ -100,15 +77,65 @@ export class BrightnessController {
     _invalidateControllerCache() {
         console.log('BrightnessController: Invalidating controller cache due to settings change');
         this._controllerCache.clear();
+        // Also drop the last-applied brightness cache. The user may have changed
+        // their light/dark brightness values in prefs, which means our previous
+        // "last applied" record no longer matches their intended target.
+        this._lastAppliedBrightness.clear();
     }
 
-    async checkBrightnessctlAvailable() {
-        try {
-            const path = GLib.find_program_in_path('brightnessctl');
-            return path !== null;
-        } catch (e) {
-            return false;
+    /**
+     * Apply static brightness for a user-chosen manual mode and pause the
+     * automatic time-based brightness loop. This is called from
+     * ExtensionController.forceThemeSwitch and from the event handlers
+     * (session mode change, screen unlock, monitors-changed) while manual
+     * mode is active.
+     *
+     * Crucially this BYPASSES calculateBrightness — manual mode is
+     * authoritative, the time-of-day target shouldn't override the user's
+     * choice. The brightness loop is also cancelled so it doesn't fight us
+     * on the next tick.
+     * @param {boolean} isDark - true to apply darkBrightness, false for lightBrightness
+     */
+    async applyManualBrightness(isDark) {
+        // Stop the automatic loop — manual overrides time-based logic.
+        if (this._brightnessTimeoutId) {
+            GLib.source_remove(this._brightnessTimeoutId);
+            this._brightnessTimeoutId = null;
         }
+
+        if (!this._settings.get_boolean('control-brightness')) {
+            return;
+        }
+
+        const monitors = this._loadEnabledMonitors();
+        if (monitors.length === 0) {
+            return;
+        }
+
+        const updatePromises = monitors.map(async monitor => {
+            const target = isDark ? monitor.darkBrightness : monitor.lightBrightness;
+            if (target === null) return;
+
+            if (this._lastAppliedBrightness.get(monitor.id) === target) {
+                console.log(`BrightnessController: manual mode — ${monitor.name} already at ${target}%, skipping write`);
+                return;
+            }
+
+            try {
+                const controller = await this._getOrCreateController(monitor);
+                const success = await controller.setBrightness(target);
+                if (success) {
+                    this._lastAppliedBrightness.set(monitor.id, target);
+                    console.log(`BrightnessController: manual ${isDark ? 'dark' : 'light'} mode — set ${monitor.name} to ${target}%`);
+                } else {
+                    console.warn(`BrightnessController: manual mode — ${monitor.name} setBrightness returned false`);
+                }
+            } catch (e) {
+                console.warn(`BrightnessController: manual mode — failed to set ${monitor.name}: ${e.message || e}`);
+            }
+        });
+
+        await Promise.allSettled(updatePromises);
     }
 
     async scheduleBrightnessUpdates() {
@@ -122,16 +149,6 @@ export class BrightnessController {
         if (!controlBrightness) {
             console.log('BrightnessController: Brightness control disabled, not scheduling updates');
             return;
-        }
-
-        // For GNOME 49+, we use native Mutter API - no external tool check needed
-        // For older versions, check if brightnessctl is available
-        if (!this._useMutterBacklight) {
-            const isBrightnessctlAvailable = await this.checkBrightnessctlAvailable();
-            if (!isBrightnessctlAvailable) {
-                console.log('BrightnessController: brightnessctl not available, not scheduling updates');
-                return;
-            }
         }
 
         if (!this._lightTime || !this._darkTime) {
@@ -394,6 +411,18 @@ export class BrightnessController {
             console.log(`BrightnessController: ${monitor.name} - in transition, target=${transitionalBrightness}%`);
             targetBrightness = transitionalBrightness;
         } else if (allowStaticBrightness) {
+            // Defensive backstop: never apply static brightness while we're inside a
+            // transition window, even if a caller mistakenly asks for it. The loop
+            // owns brightness during transitions; a static write here would fight it
+            // and historically caused "brightness snaps to lightBrightness every few
+            // minutes" while the user was in the gradual brightening period. If
+            // calculateBrightness returned null *during* a transition window, that's
+            // an edge state (boundary, settings race) — better to defer to the next
+            // loop tick than to write a wrong value.
+            if (this.isInTransitionWindow()) {
+                console.warn(`BrightnessController: ${monitor.name} - calc returned null while inside transition window, deferring to loop`);
+                return;
+            }
             const inDayPeriod = now >= this._lightTime && now < this._darkTime;
             targetBrightness = inDayPeriod ? lightBrightness : darkBrightness;
             console.log(`BrightnessController: ${monitor.name} - static brightness allowed, target=${targetBrightness}%`);
@@ -402,9 +431,20 @@ export class BrightnessController {
             return; // Not in transition window and static not allowed
         }
 
+        // Skip the write if we already wrote this exact value last time. Saves DDC
+        // EEPROM cycles and the ~200-500ms cost of the ddcutil subprocess on each
+        // event-driven re-application (lock/unlock, monitors-changed, etc.).
+        if (this._lastAppliedBrightness.get(monitor.id) === targetBrightness) {
+            console.log(`BrightnessController: ${monitor.name} already at ${targetBrightness}%, skipping write`);
+            if (monitor.consecutiveFailures) {
+                monitor.consecutiveFailures = 0;
+            }
+            return;
+        }
+
         // Apply brightness using cached controller
         try {
-            const controller = this._getOrCreateController(monitor);
+            const controller = await this._getOrCreateController(monitor);
             const success = await controller.setBrightness(targetBrightness);
 
             if (!success) {
@@ -414,6 +454,7 @@ export class BrightnessController {
                 throw new Error(`Monitor ${monitor.name} not available`);
             }
 
+            this._lastAppliedBrightness.set(monitor.id, targetBrightness);
             console.log(`BrightnessController: Updated ${monitor.name} to ${targetBrightness}%`);
 
             // Reset failure counter on success
@@ -551,6 +592,7 @@ export class BrightnessController {
 
         // Clear controller cache
         this._controllerCache.clear();
+        this._lastAppliedBrightness.clear();
 
         // Clear all state to prevent memory leaks
         this._settings = null;

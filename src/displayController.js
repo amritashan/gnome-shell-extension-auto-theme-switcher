@@ -1,36 +1,9 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-/**
- * Check if the Mutter backlight API is available.
- * This is a runtime check that verifies the API exists (GNOME 49+).
- * Returns false in prefs context (no global object).
- * @returns {boolean} True if backlight API is available
- */
-export function isMutterBacklightAvailable() {
-    try {
-        // Check if global and the monitor manager exist (shell context only)
-        if (typeof global === 'undefined' || !global.backend) {
-            return false;
-        }
-        const monitorManager = global.backend.get_monitor_manager();
-        if (!monitorManager) {
-            return false;
-        }
-        // Check if any monitor has the get_backlight method (GNOME 49+ API)
-        const logicalMonitors = monitorManager.get_logical_monitors();
-        for (const lm of logicalMonitors) {
-            for (const m of lm.get_monitors()) {
-                if (typeof m.get_backlight === 'function') {
-                    return true;
-                }
-            }
-        }
-        return false;
-    } catch (e) {
-        return false;
-    }
-}
+const GSD_POWER_BUS = 'org.gnome.SettingsDaemon.Power';
+const GSD_POWER_PATH = '/org/gnome/SettingsDaemon/Power';
+const GSD_POWER_SCREEN_IFACE = 'org.gnome.SettingsDaemon.Power.Screen';
 
 /**
  * Abstract base class for display brightness controllers.
@@ -260,6 +233,18 @@ export class DdcutilDisplay extends DisplayController {
             });
 
             console.log(`[DdcutilDisplay] Process completed`);
+
+            // Check the actual exit status. ddcutil exits non-zero on permission
+            // errors (user not in i2c group, missing udev rule), bus errors, or
+            // when the monitor doesn't respond — without this check, callers would
+            // misread the failure as a missing/unparseable response.
+            if (!proc.get_successful()) {
+                const status = proc.get_exit_status();
+                const detail = stderr && stderr.trim() ? stderr.trim() : '(no stderr)';
+                console.warn(`[DdcutilDisplay] ddcutil getvcp exited ${status} for ${this.displayInfo.name}: ${detail}`);
+                return null;
+            }
+
             const output = stdout.trim();
             console.log(`[DdcutilDisplay] stdout: "${output}"`);
             if (stderr && stderr.trim()) {
@@ -328,6 +313,17 @@ export class DdcutilDisplay extends DisplayController {
                     }
                 });
             });
+
+            // Check the actual exit status. Without this, a permission-denied
+            // (e.g. user not in i2c group, missing udev rule) or any other
+            // ddcutil failure was silently treated as success — and the cache
+            // happily recorded the phantom write.
+            if (!proc.get_successful()) {
+                const status = proc.get_exit_status();
+                const detail = stderr && stderr.trim() ? stderr.trim() : '(no stderr)';
+                console.warn(`[DdcutilDisplay] ddcutil setvcp exited ${status} for ${this.displayInfo.name}: ${detail}`);
+                return false;
+            }
 
             if (stderr && stderr.trim()) {
                 console.warn(`[DdcutilDisplay] stderr: ${stderr.trim()}`);
@@ -400,8 +396,21 @@ export class MutterBacklightDisplay extends DisplayController {
      * @private
      */
     _findMonitorBacklight() {
+        // The Mutter API is only reachable in the shell context. The prefs context
+        // also probes display backends (for slider previews) but `global` is
+        // undefined there — guard up front to avoid noisy ReferenceError logs from
+        // the catch below.
+        if (typeof global === 'undefined' || !global.backend) {
+            return null;
+        }
         try {
             const monitorManager = global.backend.get_monitor_manager();
+            // Mutter's logical monitor enumeration only exists on GNOME 49+ — on
+            // older releases this method is missing and probeDisplayController
+            // correctly falls through to the legacy backends.
+            if (typeof monitorManager?.get_logical_monitors !== 'function') {
+                return null;
+            }
             const logicalMonitors = monitorManager.get_logical_monitors();
 
             for (const lm of logicalMonitors) {
@@ -534,4 +543,139 @@ export class MutterBacklightDisplay extends DisplayController {
 
         return monitors;
     }
+}
+
+/**
+ * Display controller for the built-in laptop display via gnome-settings-daemon's
+ * Power d-bus service. Avoids spawning brightnessctl on GNOME versions where
+ * the native Mutter backlight API isn't available (pre-49).
+ *
+ * D-Bus interface: org.gnome.SettingsDaemon.Power.Screen
+ *   Property "Brightness" (int32, 0-100, or -1 if no backlight)
+ */
+export class SettingsDaemonPowerDisplay extends DisplayController {
+    constructor(settings) {
+        super({
+            id: 'builtin',
+            name: 'Built-in Display',
+            type: 'gsd-power',
+            identifier: null
+        }, settings);
+        this._proxy = null;
+    }
+
+    async _getProxy() {
+        if (!this._proxy) {
+            this._proxy = await Gio.DBusProxy.new(
+                Gio.DBus.session,
+                Gio.DBusProxyFlags.DO_NOT_AUTO_START,
+                null,
+                GSD_POWER_BUS,
+                GSD_POWER_PATH,
+                GSD_POWER_SCREEN_IFACE,
+                null
+            );
+        }
+        return this._proxy;
+    }
+
+    async getBrightness() {
+        const proxy = await this._getProxy();
+        const variant = proxy.get_cached_property('Brightness');
+        if (variant === null) return null;
+        const value = variant.get_int32();
+        if (value < 0) return null;
+        return Math.max(0, Math.min(100, value));
+    }
+
+    async setBrightness(value) {
+        try {
+            const proxy = await this._getProxy();
+            const clamped = Math.max(0, Math.min(100, Math.round(value)));
+            // Use the explicit-callback form rather than relying on GJS's
+            // promise auto-conversion. The latter requires a specific GJS
+            // version; on older GJS, calling without a callback throws
+            // "method Gio.DBusProxy.call: At least 6 arguments required".
+            await new Promise((resolve, reject) => {
+                proxy.call(
+                    'org.freedesktop.DBus.Properties.Set',
+                    new GLib.Variant('(ssv)', [
+                        GSD_POWER_SCREEN_IFACE,
+                        'Brightness',
+                        new GLib.Variant('i', clamped),
+                    ]),
+                    Gio.DBusCallFlags.NONE,
+                    -1,
+                    null,
+                    (proxyArg, res) => {
+                        try {
+                            proxyArg.call_finish(res);
+                            resolve();
+                        } catch (err) {
+                            reject(err);
+                        }
+                    }
+                );
+            });
+            return true;
+        } catch (e) {
+            console.error(`SettingsDaemonPowerDisplay: Failed to set brightness: ${e}`);
+            return false;
+        }
+    }
+
+    async isAvailable() {
+        try {
+            const brightness = await this.getBrightness();
+            return brightness !== null;
+        } catch (e) {
+            return false;
+        }
+    }
+}
+
+/**
+ * Pick the best available DisplayController for a monitor by probing backends
+ * in priority order:
+ *
+ *   1. MutterBacklight     — native Mutter API, GNOME 49+, all monitor kinds
+ *   2. SettingsDaemonPower — gnome-settings-daemon Power d-bus, built-in only
+ *   3. BrightnessCtl       — brightnessctl spawn fallback, built-in last resort
+ *   4. Ddcutil             — ddcutil spawn, external monitors on pre-49
+ *
+ * Always resolves — the last-resort spawn backends are returned without
+ * probing if nothing better matches, so callers don't need rejection handling.
+ *
+ * Used by both the shell-side BrightnessController and the prefs-side
+ * MonitorConfigDialog so the d-bus path is taken consistently in both places.
+ *
+ * @param {Object} monitor - Monitor object from settings (must have id, name; type optional)
+ * @param {Gio.Settings} settings - Extension settings
+ * @returns {Promise<DisplayController>}
+ */
+export async function probeDisplayController(monitor, settings) {
+    const mutter = new MutterBacklightDisplay({
+        id: monitor.id,
+        name: monitor.name,
+        displayName: monitor.name,
+    }, settings);
+    if (await mutter.isAvailable()) {
+        console.log(`probeDisplayController: ${monitor.name} → Mutter backlight API`);
+        return mutter;
+    }
+
+    const isBuiltin = monitor.id === 'builtin' || monitor.type === 'brightnessctl';
+
+    if (isBuiltin) {
+        const dbus = new SettingsDaemonPowerDisplay(settings);
+        if (await dbus.isAvailable()) {
+            console.log(`probeDisplayController: ${monitor.name} → SettingsDaemon.Power d-bus`);
+            return dbus;
+        }
+        console.log(`probeDisplayController: ${monitor.name} → brightnessctl (last resort)`);
+        return new BrightnessCtlDisplay(settings);
+    }
+
+    console.log(`probeDisplayController: ${monitor.name} → ddcutil`);
+    return new DdcutilDisplay(monitor, settings);
 }
