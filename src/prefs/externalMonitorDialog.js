@@ -2,9 +2,9 @@ import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
 import GLib from 'gi://GLib';
 import { DisplayManager } from './displayManager.js';
-import { DdcutilDisplay, BrightnessCtlDisplay } from './displayController.js';
+import { DdcutilDisplay, BrightnessCtlDisplay } from '../displayController.js';
 import { BrightnessSliderRow } from './brightnessSliderRow.js';
-import { BRIGHTNESS_TRANSITION_DURATIONS } from './constants.js';
+import { BRIGHTNESS_TRANSITION_DURATIONS } from '../constants.js';
 
 /**
  * Dialog window for configuring all monitor brightness control.

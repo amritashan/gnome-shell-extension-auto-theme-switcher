@@ -8,9 +8,9 @@ export const MINUTES_PER_HOUR = 60;
 export const HOURS_PER_DAY = 24;
 export const MS_PER_DAY = HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE * MS_PER_SECOND; // 86400000
 
-// Brightness update interval
-export const BRIGHTNESS_UPDATE_INTERVAL_SECONDS = 600; // 10 minutes
-export const BRIGHTNESS_UPDATE_INTERVAL_MS = BRIGHTNESS_UPDATE_INTERVAL_SECONDS * MS_PER_SECOND;
+// Brightness transition timing
+export const MIN_BRIGHTNESS_UPDATE_INTERVAL_SECONDS = 15; // Floor to avoid hammering DDC/CI
+export const DEFAULT_BRIGHTNESS_UPDATE_INTERVAL_SECONDS = 60; // Fallback when no monitors configured
 
 // Debug panel refresh intervals
 export const DEBUG_TIME_UPDATE_INTERVAL_SECONDS = 1; // Update countdown every second

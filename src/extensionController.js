@@ -25,6 +25,7 @@ export class ExtensionController {
         this._screenSaverProxy = null;
         this._screenSaverSignalId = null;
         this._suspendSignalId = null;
+        this._monitorsChangedId = null;
 
         // Initialize controllers and helpers
         this._brightnessController = new BrightnessController(this._settings);
@@ -40,6 +41,9 @@ export class ExtensionController {
         // Setup lock/unlock detection
         this._setupLockUnlockDetection();
 
+        // Listen for monitor hotplug / readiness changes
+        this._setupMonitorsChangedHandler();
+
         // Listen for system suspend/resume events
         this._setupSuspendResumeHandler();
 
@@ -50,7 +54,7 @@ export class ExtensionController {
         this._showMigrationNotificationIfPending();
 
         // Run the main logic loop
-        this._scheduleNextChangeEvent(true);
+        this._scheduleNextChangeEvent();
     }
 
     /**
@@ -151,6 +155,16 @@ export class ExtensionController {
         });
     }
 
+    _setupMonitorsChangedHandler() {
+        const monitorManager = global.backend.get_monitor_manager();
+        this._monitorsChangedId = monitorManager.connect('monitors-changed', () => {
+            console.log('ExtensionController: Monitors changed, re-applying brightness');
+            this._brightnessController.updateBrightness(true).catch(e => {
+                console.error('ExtensionController: Failed to update brightness after monitors changed:', e);
+            });
+        });
+    }
+
     _setupSuspendResumeHandler() {
         this._suspendSignalId = Gio.DBus.system.signal_subscribe(
             'org.freedesktop.login1',
@@ -218,6 +232,13 @@ export class ExtensionController {
         }
         this._screenSaverProxy = null;
 
+        // Disconnect monitors-changed signal
+        if (this._monitorsChangedId) {
+            const monitorManager = global.backend.get_monitor_manager();
+            monitorManager.disconnect(this._monitorsChangedId);
+            this._monitorsChangedId = null;
+        }
+
         // Unsubscribe from suspend/resume signals
         if (this._suspendSignalId) {
             Gio.DBus.system.signal_unsubscribe(this._suspendSignalId);
@@ -263,7 +284,7 @@ export class ExtensionController {
         this._extension = null;
     }
 
-    _scheduleNextChangeEvent(isInitialEnable = false) {
+    _scheduleNextChangeEvent() {
         // Clear existing schedule timeout
         if (this._scheduleTimeoutId) {
             GLib.source_remove(this._scheduleTimeoutId);
@@ -328,10 +349,13 @@ export class ExtensionController {
         let nextEventTime, switchToDark;
         if (now >= darkTime || now < lightTime) {
             this._themeController.switchTheme(true, true, this._manualModeActive);
-            // Fire-and-forget async brightness update
-            this._brightnessController.updateBrightness(true).catch(e => {
-                console.error('ExtensionController: Failed to update brightness on initial schedule:', e);
-            });
+            // Only apply static brightness if NOT in a transition window
+            // The scheduled brightness loop handles gradual transitions
+            if (!this._brightnessController.isInTransitionWindow()) {
+                this._brightnessController.updateBrightness(true).catch(e => {
+                    console.error('ExtensionController: Failed to update brightness on initial schedule:', e);
+                });
+            }
             switchToDark = false;
             if (now < lightTime) {
                 nextEventTime = lightTime;
@@ -341,10 +365,13 @@ export class ExtensionController {
             this._debugInfo.currentMode = 'night';
         } else {
             this._themeController.switchTheme(false, true, this._manualModeActive);
-            // Fire-and-forget async brightness update
-            this._brightnessController.updateBrightness(true).catch(e => {
-                console.error('ExtensionController: Failed to update brightness on initial schedule:', e);
-            });
+            // Only apply static brightness if NOT in a transition window
+            // The scheduled brightness loop handles gradual transitions
+            if (!this._brightnessController.isInTransitionWindow()) {
+                this._brightnessController.updateBrightness(true).catch(e => {
+                    console.error('ExtensionController: Failed to update brightness on initial schedule:', e);
+                });
+            }
             switchToDark = true;
             nextEventTime = darkTime;
             this._debugInfo.currentMode = 'day';
@@ -358,7 +385,8 @@ export class ExtensionController {
 
         this._scheduleTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secondsToNextEvent, () => {
             this._themeController.switchTheme(switchToDark, true, this._manualModeActive);
-            // Fire-and-forget async brightness update
+            // Apply brightness at theme switch time (this is the END of a transition, not during)
+            // At switch time, we should apply the target brightness (light or dark)
             this._brightnessController.updateBrightness(true).catch(e => {
                 console.error('ExtensionController: Failed to update brightness on scheduled event:', e);
             });
@@ -366,12 +394,10 @@ export class ExtensionController {
             return GLib.SOURCE_REMOVE;
         });
 
-        if (isInitialEnable) {
-            // Fire-and-forget async brightness update
-            this._brightnessController.updateBrightness(true).catch(e => {
-                console.error('ExtensionController: Failed to update brightness on initial enable:', e);
-            });
-        }
+        // Note: brightness is already applied above in the day/night block.
+        // For external monitors that aren't ready yet at startup,
+        // the monitors-changed signal handler will re-apply brightness
+        // once Mutter finishes initializing them.
     }
 
     _storeDebugInfo(now, lightTime, darkTime, lightTrigger, darkTrigger, solarTimes) {

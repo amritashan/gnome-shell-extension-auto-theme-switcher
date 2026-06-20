@@ -1,11 +1,16 @@
-import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import {
-    BRIGHTNESS_UPDATE_INTERVAL_SECONDS,
+    MIN_BRIGHTNESS_UPDATE_INTERVAL_SECONDS,
+    DEFAULT_BRIGHTNESS_UPDATE_INTERVAL_SECONDS,
     MS_PER_SECOND,
     MS_PER_DAY
 } from './constants.js';
-import { DdcutilDisplay, BrightnessCtlDisplay } from './displayController.js';
+import {
+    DdcutilDisplay,
+    BrightnessCtlDisplay,
+    MutterBacklightDisplay,
+    isMutterBacklightAvailable
+} from './displayController.js';
 
 export class BrightnessController {
     constructor(settings) {
@@ -15,6 +20,15 @@ export class BrightnessController {
         this._lightTime = null;
         this._darkTime = null;
         this._controllerCache = new Map(); // Cache DisplayController instances
+
+        // Check if native Mutter backlight API is available (GNOME 49+)
+        // This check is cached since it won't change during runtime
+        this._useMutterBacklight = isMutterBacklightAvailable();
+        if (this._useMutterBacklight) {
+            console.log('BrightnessController: Using native Mutter backlight API (GNOME 49+)');
+        } else {
+            console.log('BrightnessController: Using legacy brightness control (brightnessctl/ddcutil)');
+        }
 
         // Listen for monitor config changes to invalidate cache
         this._monitorsChangedId = this._settings.connect('changed::monitors', () => {
@@ -46,6 +60,8 @@ export class BrightnessController {
     /**
      * Get or create a DisplayController for a monitor.
      * Controllers are cached for performance.
+     * On GNOME 49+, uses native Mutter backlight API for all monitors.
+     * On older versions, falls back to brightnessctl/ddcutil.
      * @param {Object} monitor - Monitor object
      * @returns {DisplayController} Controller instance
      * @private
@@ -53,13 +69,26 @@ export class BrightnessController {
     _getOrCreateController(monitor) {
         if (!this._controllerCache.has(monitor.id)) {
             let controller;
-            if (monitor.type === 'brightnessctl') {
+
+            if (this._useMutterBacklight) {
+                // GNOME 49+: Use native Mutter backlight API for all monitors
+                controller = new MutterBacklightDisplay({
+                    id: monitor.id,
+                    name: monitor.name,
+                    displayName: monitor.name // Use stored name to find monitor
+                }, this._settings);
+                console.log(`BrightnessController: Created Mutter controller for ${monitor.name}`);
+            } else if (monitor.type === 'brightnessctl') {
+                // Legacy: Built-in display via brightnessctl
                 controller = new BrightnessCtlDisplay(this._settings);
+                console.log(`BrightnessController: Created brightnessctl controller for ${monitor.name}`);
             } else {
+                // Legacy: External monitor via ddcutil
                 controller = new DdcutilDisplay(monitor, this._settings);
+                console.log(`BrightnessController: Created ddcutil controller for ${monitor.name}`);
             }
+
             this._controllerCache.set(monitor.id, controller);
-            console.log(`BrightnessController: Created controller for ${monitor.name} (${monitor.type})`);
         }
         return this._controllerCache.get(monitor.id);
     }
@@ -95,11 +124,14 @@ export class BrightnessController {
             return;
         }
 
-        // Check if brightnessctl is available
-        const isBrightnessctlAvailable = await this.checkBrightnessctlAvailable();
-        if (!isBrightnessctlAvailable) {
-            console.log('BrightnessController: brightnessctl not available, not scheduling updates');
-            return;
+        // For GNOME 49+, we use native Mutter API - no external tool check needed
+        // For older versions, check if brightnessctl is available
+        if (!this._useMutterBacklight) {
+            const isBrightnessctlAvailable = await this.checkBrightnessctlAvailable();
+            if (!isBrightnessctlAvailable) {
+                console.log('BrightnessController: brightnessctl not available, not scheduling updates');
+                return;
+            }
         }
 
         if (!this._lightTime || !this._darkTime) {
@@ -123,6 +155,7 @@ export class BrightnessController {
         const inDayPeriod = now >= this._lightTime && now < this._darkTime;
         let nextWindowStart;
         let nextWindowEnd;
+        let windowDurationMs;
 
         if (inDayPeriod) {
             if (gradualDecreaseEnabled) {
@@ -130,9 +163,11 @@ export class BrightnessController {
                 if (now < dimStartTime) {
                     nextWindowStart = dimStartTime;
                     nextWindowEnd = this._darkTime;
+                    windowDurationMs = decreaseDuration;
                 } else if (now < this._darkTime) {
                     nextWindowStart = now;
                     nextWindowEnd = this._darkTime;
+                    windowDurationMs = decreaseDuration;
                 } else {
                     nextWindowStart = null;
                 }
@@ -150,9 +185,11 @@ export class BrightnessController {
                 if (now < brightenStartTime) {
                     nextWindowStart = brightenStartTime;
                     nextWindowEnd = nextLightTime;
+                    windowDurationMs = increaseDuration;
                 } else if (now < nextLightTime) {
                     nextWindowStart = now;
                     nextWindowEnd = nextLightTime;
+                    windowDurationMs = increaseDuration;
                 } else {
                     nextWindowStart = null;
                 }
@@ -167,12 +204,14 @@ export class BrightnessController {
                 const tomorrowLightTime = new Date(this._lightTime.getTime() + MS_PER_DAY);
                 nextWindowStart = new Date(tomorrowLightTime.getTime() - increaseDuration);
                 nextWindowEnd = tomorrowLightTime;
+                windowDurationMs = increaseDuration;
             } else if (!inDayPeriod && gradualDecreaseEnabled) {
                 const nextDarkTime = now >= this._darkTime ?
                     new Date(this._darkTime.getTime() + MS_PER_DAY) :
                     this._darkTime;
                 nextWindowStart = new Date(nextDarkTime.getTime() - decreaseDuration);
                 nextWindowEnd = nextDarkTime;
+                windowDurationMs = decreaseDuration;
             } else {
                 return;
             }
@@ -185,17 +224,20 @@ export class BrightnessController {
             const minutes = Math.floor((secondsUntilWindowStart % 3600) / 60);
             console.log(`BrightnessController: Scheduling brightness update loop to start in ${hours}h ${minutes}m`);
             this._brightnessTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secondsUntilWindowStart, () => {
-                this._startBrightnessUpdateLoop(nextWindowEnd);
+                this._startBrightnessUpdateLoop(nextWindowEnd, windowDurationMs);
                 return GLib.SOURCE_REMOVE;
             });
         } else {
             console.log('BrightnessController: Starting brightness update loop immediately (already in window)');
-            this._startBrightnessUpdateLoop(nextWindowEnd);
+            this._startBrightnessUpdateLoop(nextWindowEnd, windowDurationMs);
         }
     }
 
-    _startBrightnessUpdateLoop(windowEnd) {
-        console.log(`BrightnessController: Starting update loop (window ends at ${windowEnd.toLocaleString()})`);
+    _startBrightnessUpdateLoop(windowEnd, windowDurationMs) {
+        // Calculate optimal update interval for smooth transitions
+        const updateIntervalSeconds = this._calculateUpdateInterval(windowDurationMs);
+
+        console.log(`BrightnessController: Starting update loop (window ends at ${windowEnd.toLocaleString()}, interval=${updateIntervalSeconds}s)`);
 
         // Update immediately (fire-and-forget async)
         this.updateBrightness().catch(e => {
@@ -209,8 +251,8 @@ export class BrightnessController {
             this._brightnessTimeoutId = null;
         }
 
-        // Schedule updates every 10 minutes until window ends
-        this._brightnessTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, BRIGHTNESS_UPDATE_INTERVAL_SECONDS, () => {
+        // Schedule updates at the calculated interval until window ends
+        this._brightnessTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, updateIntervalSeconds, () => {
             const now = new Date();
 
             if (now >= windowEnd) {
@@ -225,7 +267,6 @@ export class BrightnessController {
                 return GLib.SOURCE_REMOVE;
             }
 
-            console.log('BrightnessController: Timer fired - updating brightness');
             // Fire-and-forget async update
             this.updateBrightness().catch(e => {
                 console.error('BrightnessController: Error during scheduled update:', e);
@@ -233,6 +274,40 @@ export class BrightnessController {
             return GLib.SOURCE_CONTINUE;
         });
         console.log(`BrightnessController: Timer scheduled with ID ${this._brightnessTimeoutId}`);
+    }
+
+    /**
+     * Calculate the optimal update interval for smooth brightness transitions.
+     * Each step should change brightness by ~1% for the monitor with the largest range.
+     * @param {number} windowDurationMs - Total transition window duration in milliseconds
+     * @returns {number} Update interval in seconds
+     * @private
+     */
+    _calculateUpdateInterval(windowDurationMs) {
+        const monitors = this._loadEnabledMonitors();
+
+        if (monitors.length === 0) {
+            return DEFAULT_BRIGHTNESS_UPDATE_INTERVAL_SECONDS;
+        }
+
+        // Find the largest brightness delta across all monitors
+        let maxDelta = 0;
+        for (const monitor of monitors) {
+            if (monitor.lightBrightness !== null && monitor.darkBrightness !== null) {
+                const delta = Math.abs(monitor.lightBrightness - monitor.darkBrightness);
+                maxDelta = Math.max(maxDelta, delta);
+            }
+        }
+
+        if (maxDelta === 0) {
+            return DEFAULT_BRIGHTNESS_UPDATE_INTERVAL_SECONDS;
+        }
+
+        // interval = totalDuration / numberOfSteps, where each step is ~1% brightness
+        const windowDurationSeconds = windowDurationMs / MS_PER_SECOND;
+        const interval = windowDurationSeconds / maxDelta;
+
+        return Math.max(MIN_BRIGHTNESS_UPDATE_INTERVAL_SECONDS, Math.round(interval));
     }
 
     /**
@@ -330,7 +405,15 @@ export class BrightnessController {
         // Apply brightness using cached controller
         try {
             const controller = this._getOrCreateController(monitor);
-            await controller.setBrightness(targetBrightness);
+            const success = await controller.setBrightness(targetBrightness);
+
+            if (!success) {
+                // setBrightness returned false (e.g. monitor not found in Mutter)
+                monitor.consecutiveFailures = (monitor.consecutiveFailures || 0) + 1;
+                console.warn(`BrightnessController: ${monitor.name} not available (failure #${monitor.consecutiveFailures})`);
+                throw new Error(`Monitor ${monitor.name} not available`);
+            }
+
             console.log(`BrightnessController: Updated ${monitor.name} to ${targetBrightness}%`);
 
             // Reset failure counter on success
@@ -338,8 +421,10 @@ export class BrightnessController {
                 monitor.consecutiveFailures = 0;
             }
         } catch (e) {
-            // Track consecutive failures
-            monitor.consecutiveFailures = (monitor.consecutiveFailures || 0) + 1;
+            // Track consecutive failures (may already be incremented above)
+            if (!monitor.consecutiveFailures) {
+                monitor.consecutiveFailures = (monitor.consecutiveFailures || 0) + 1;
+            }
             console.warn(`BrightnessController: Failed to update ${monitor.name} (failure #${monitor.consecutiveFailures}): ${e.message}`);
 
             if (monitor.consecutiveFailures >= 3) {
@@ -413,6 +498,42 @@ export class BrightnessController {
                 return null;
             }
         }
+    }
+
+    /**
+     * Check if currently in a brightness transition window.
+     * @returns {boolean} True if in a transition window
+     */
+    isInTransitionWindow() {
+        if (!this._lightTime || !this._darkTime) {
+            return false;
+        }
+
+        const now = new Date();
+        const gradualDecreaseEnabled = this._settings.get_boolean('gradual-brightness-decrease-enabled');
+        const gradualIncreaseEnabled = this._settings.get_boolean('gradual-brightness-increase-enabled');
+        const decreaseDuration = this._settings.get_int('gradual-brightness-decrease-duration') * MS_PER_SECOND;
+        const increaseDuration = this._settings.get_int('gradual-brightness-increase-duration') * MS_PER_SECOND;
+
+        const inDayPeriod = now >= this._lightTime && now < this._darkTime;
+
+        if (inDayPeriod && gradualDecreaseEnabled) {
+            const dimStartTime = new Date(this._darkTime.getTime() - decreaseDuration);
+            if (now >= dimStartTime && now < this._darkTime) {
+                return true;
+            }
+        } else if (!inDayPeriod && gradualIncreaseEnabled) {
+            let nextLightTime = this._lightTime;
+            if (now >= this._darkTime) {
+                nextLightTime = new Date(this._lightTime.getTime() + MS_PER_DAY);
+            }
+            const brightenStartTime = new Date(nextLightTime.getTime() - increaseDuration);
+            if (now >= brightenStartTime && now < nextLightTime) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     cleanup() {

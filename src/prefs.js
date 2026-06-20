@@ -9,7 +9,7 @@ import {
     DEBUG_INFO_REFRESH_INTERVAL_SECONDS,
     MS_PER_SECOND,
 } from './constants.js';
-import { MonitorConfigDialog } from './externalMonitorDialog.js';
+import { MonitorConfigDialog } from './prefs/externalMonitorDialog.js';
 
 export default class ThemeSwitcherPreferences extends ExtensionPreferences {
     /**

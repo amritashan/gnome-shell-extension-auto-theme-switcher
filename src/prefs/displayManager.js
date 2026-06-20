@@ -1,7 +1,7 @@
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
-import { DdcutilDisplay, BrightnessCtlDisplay } from './displayController.js';
-import { MigrationManager } from './migrationManager.js';
+import { DdcutilDisplay, BrightnessCtlDisplay } from '../displayController.js';
+import { MigrationManager } from '../migrationManager.js';
 
 /**
  * Manages detection and tracking of all monitors (built-in and external).

@@ -24,6 +24,9 @@ build_extension() {
     echo "Copying all files from $SRC_DIR/ to $BUILD_DIR/..."
     cp -rv "$SRC_DIR"/* "$BUILD_DIR/"
 
+    # Remove compiled schemas (not needed for GNOME 45+, causes EGO rejection)
+    rm -f "$BUILD_DIR/schemas/gschemas.compiled"
+
     echo ""
     echo "Build complete! Files in $BUILD_DIR:"
     ls -lh "$BUILD_DIR"/*.js "$BUILD_DIR"/*.json 2>/dev/null || true

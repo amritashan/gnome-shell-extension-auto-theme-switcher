@@ -2,6 +2,37 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 /**
+ * Check if the Mutter backlight API is available.
+ * This is a runtime check that verifies the API exists (GNOME 49+).
+ * Returns false in prefs context (no global object).
+ * @returns {boolean} True if backlight API is available
+ */
+export function isMutterBacklightAvailable() {
+    try {
+        // Check if global and the monitor manager exist (shell context only)
+        if (typeof global === 'undefined' || !global.backend) {
+            return false;
+        }
+        const monitorManager = global.backend.get_monitor_manager();
+        if (!monitorManager) {
+            return false;
+        }
+        // Check if any monitor has the get_backlight method (GNOME 49+ API)
+        const logicalMonitors = monitorManager.get_logical_monitors();
+        for (const lm of logicalMonitors) {
+            for (const m of lm.get_monitors()) {
+                if (typeof m.get_backlight === 'function') {
+                    return true;
+                }
+            }
+        }
+        return false;
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
  * Abstract base class for display brightness controllers.
  * Provides a unified interface for controlling brightness across different display types.
  */
@@ -336,5 +367,171 @@ export class DdcutilDisplay extends DisplayController {
         } catch (e) {
             return false;
         }
+    }
+}
+
+/**
+ * Display controller using GNOME's native Mutter backlight API.
+ * Available in GNOME 49+ for both built-in and external monitors.
+ * Uses monitor.get_backlight() for DDC/CI and backlight control.
+ */
+export class MutterBacklightDisplay extends DisplayController {
+    /**
+     * @param {Object} displayInfo - Display identification information
+     * @param {string} displayInfo.id - Unique identifier for this display
+     * @param {string} displayInfo.name - Human-readable name
+     * @param {string} displayInfo.displayName - The display name from Mutter (used to find the monitor)
+     * @param {Gio.Settings} settings - Extension settings object
+     */
+    constructor(displayInfo, settings) {
+        super({
+            id: displayInfo.id,
+            name: displayInfo.name,
+            type: 'mutter-backlight',
+            identifier: displayInfo.displayName
+        }, settings);
+
+        this.displayName = displayInfo.displayName;
+    }
+
+    /**
+     * Find the monitor and its backlight by display name.
+     * @returns {Object|null} Object with {monitor, backlight} or null if not found
+     * @private
+     */
+    _findMonitorBacklight() {
+        try {
+            const monitorManager = global.backend.get_monitor_manager();
+            const logicalMonitors = monitorManager.get_logical_monitors();
+
+            for (const lm of logicalMonitors) {
+                for (const monitor of lm.get_monitors()) {
+                    if (!monitor.is_active()) continue;
+
+                    const backlight = monitor.get_backlight();
+                    if (!backlight) continue;
+
+                    // Match by display name
+                    const name = monitor.get_display_name();
+                    if (name === this.displayName) {
+                        return { monitor, backlight };
+                    }
+                }
+            }
+            return null;
+        } catch (e) {
+            console.error(`MutterBacklightDisplay: Error finding monitor: ${e}`);
+            return null;
+        }
+    }
+
+    /**
+     * Get current brightness as a percentage.
+     * @returns {Promise<number|null>} Brightness percentage (0-100), or null if failed
+     */
+    async getBrightness() {
+        try {
+            const result = this._findMonitorBacklight();
+            if (!result) {
+                console.warn(`MutterBacklightDisplay: Monitor "${this.displayName}" not found or has no backlight`);
+                return null;
+            }
+
+            const { backlight } = result;
+            const { brightness, brightnessMin: min, brightnessMax: max } = backlight;
+
+            if (max === min) {
+                console.warn(`MutterBacklightDisplay: Invalid brightness range for ${this.displayName}`);
+                return null;
+            }
+
+            // Calculate percentage (0-100)
+            const percentage = Math.round(((brightness - min) / (max - min)) * 100);
+            return Math.max(0, Math.min(100, percentage));
+        } catch (e) {
+            console.error(`MutterBacklightDisplay: Failed to get brightness for ${this.displayName}: ${e}`);
+            return null;
+        }
+    }
+
+    /**
+     * Set brightness to a percentage value.
+     * @param {number} value - Brightness percentage (0-100)
+     * @returns {Promise<boolean>} True if successful
+     */
+    async setBrightness(value) {
+        try {
+            const result = this._findMonitorBacklight();
+            if (!result) {
+                console.warn(`MutterBacklightDisplay: Monitor "${this.displayName}" not found or has no backlight`);
+                return false;
+            }
+
+            const { backlight } = result;
+            const { brightnessMin: min, brightnessMax: max } = backlight;
+
+            // Convert percentage (0-100) to backlight range
+            const clampedValue = Math.max(0, Math.min(100, Math.round(value)));
+            const brightnessValue = min + ((max - min) * clampedValue / 100);
+
+            backlight.brightness = Math.round(brightnessValue);
+
+            console.log(`MutterBacklightDisplay: Set ${this.displayName} brightness to ${clampedValue}%`);
+            return true;
+        } catch (e) {
+            console.error(`MutterBacklightDisplay: Failed to set brightness for ${this.displayName}: ${e}`);
+            return false;
+        }
+    }
+
+    /**
+     * Check if this display is available and has backlight control.
+     * @returns {Promise<boolean>} True if display can be controlled
+     */
+    async isAvailable() {
+        const result = this._findMonitorBacklight();
+        return result !== null;
+    }
+
+    /**
+     * Get all monitors with backlight support.
+     * Static method for discovery.
+     * @returns {Array} Array of monitor info objects
+     */
+    static getAvailableMonitors() {
+        const monitors = [];
+
+        try {
+            const monitorManager = global.backend.get_monitor_manager();
+            const logicalMonitors = monitorManager.get_logical_monitors();
+
+            for (const lm of logicalMonitors) {
+                for (const monitor of lm.get_monitors()) {
+                    if (!monitor.is_active()) continue;
+
+                    const backlight = monitor.get_backlight();
+                    if (!backlight) continue;
+
+                    const displayName = monitor.get_display_name();
+                    const connector = monitor.get_connector();
+
+                    monitors.push({
+                        id: `mutter-${connector || displayName}`,
+                        name: displayName,
+                        displayName: displayName,
+                        connector: connector,
+                        type: 'mutter-backlight',
+                        // Include current brightness info
+                        brightnessMin: backlight.brightnessMin,
+                        brightnessMax: backlight.brightnessMax,
+                        currentBrightness: backlight.brightness
+                    });
+                }
+            }
+        } catch (e) {
+            console.error(`MutterBacklightDisplay: Error getting available monitors: ${e}`);
+        }
+
+        return monitors;
     }
 }
