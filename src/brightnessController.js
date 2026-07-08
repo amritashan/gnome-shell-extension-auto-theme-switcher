@@ -18,6 +18,13 @@ export class BrightnessController {
         // Storing promises lets concurrent probes for the same monitor share the result.
         this._controllerCache = new Map();
 
+        // Per-monitor ramp anchor, keyed by monitor.id: the ACTUAL brightness the
+        // display was at when the current transition window started. Gradual
+        // transitions interpolate anchor -> target instead of configured-endpoint
+        // -> target, so a manual brightness change made during the day/night
+        // doesn't get snapped back to the configured value at window start.
+        this._transitionAnchors = new Map();
+
         // Per-monitor cache of the last brightness we successfully wrote, keyed by
         // monitor.id. Used to skip redundant setBrightness calls — important for
         // ddcutil monitors where each write is slow (~200-500ms) and persists to
@@ -102,6 +109,7 @@ export class BrightnessController {
             GLib.source_remove(this._brightnessTimeoutId);
             this._brightnessTimeoutId = null;
         }
+        this._transitionAnchors.clear();
 
         if (!this._settings.get_boolean('control-brightness')) {
             return;
@@ -256,10 +264,15 @@ export class BrightnessController {
 
         console.log(`BrightnessController: Starting update loop (window ends at ${windowEnd.toLocaleString()}, interval=${updateIntervalSeconds}s)`);
 
-        // Update immediately (fire-and-forget async)
-        this.updateBrightness().catch(e => {
-            console.error('BrightnessController: Error during initial update:', e);
-        });
+        // Anchor the ramp at each monitor's ACTUAL brightness before the first
+        // write, then update (fire-and-forget async). If the user manually
+        // changed brightness since the last static apply, the transition starts
+        // from that value instead of snapping to the configured endpoint.
+        this._captureTransitionAnchors()
+            .then(() => this.updateBrightness())
+            .catch(e => {
+                console.error('BrightnessController: Error during initial update:', e);
+            });
 
         // Clear any existing timer
         if (this._brightnessTimeoutId) {
@@ -275,6 +288,8 @@ export class BrightnessController {
             if (now >= windowEnd) {
                 // Window has ended - schedule next window AFTER this timer is fully cleaned up
                 console.log('BrightnessController: Update window ended, stopping timer and rescheduling');
+                // Anchors are only meaningful within the window they were captured in
+                this._transitionAnchors.clear();
                 // Use idle_add to defer the rescheduling until the next event loop iteration
                 this._brightnessTimeoutId = null; // Clear immediately to prevent double-removal
                 GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
@@ -333,6 +348,11 @@ export class BrightnessController {
      * @param {boolean} allowStaticBrightness - If true, apply static light/dark brightness outside transition windows
      */
     async updateBrightness(allowStaticBrightness = false) {
+        // Extension may have been disabled while an async chain was pending
+        if (!this._settings) {
+            return;
+        }
+
         console.log(`BrightnessController: updateBrightness called (allowStaticBrightness=${allowStaticBrightness})`);
 
         const controlBrightness = this._settings.get_boolean('control-brightness');
@@ -351,14 +371,14 @@ export class BrightnessController {
         const now = new Date();
         console.log(`BrightnessController: Updating ${monitors.length} monitor(s) at ${now.toLocaleString()}`);
 
-        // Read global duration settings (same for all monitors in this release)
-        const globalIncreaseDuration = this._settings.get_int('gradual-brightness-increase-duration');
-        const globalDecreaseDuration = this._settings.get_int('gradual-brightness-decrease-duration');
+        // Resolve the transition durations once — same global values the
+        // scheduler uses, so the loop's math can't drift from the loop's timing.
+        const { increaseDuration, decreaseDuration } = this._resolveDurations();
 
         // Update all monitors in parallel
         const updatePromises = monitors.map(monitor =>
             this._updateSingleMonitor(monitor, now, allowStaticBrightness,
-                                      globalIncreaseDuration, globalDecreaseDuration)
+                                      increaseDuration, decreaseDuration)
         );
 
         // Wait for all updates to complete (or fail)
@@ -383,27 +403,24 @@ export class BrightnessController {
      * @param {Object} monitor - Monitor configuration object
      * @param {Date} now - Current time
      * @param {boolean} allowStaticBrightness - Whether to apply static brightness outside transitions
-     * @param {number} globalIncreaseDuration - Global increase duration in seconds
-     * @param {number} globalDecreaseDuration - Global decrease duration in seconds
+     * @param {number} increaseDuration - Increase duration in seconds (global; see _resolveDurations)
+     * @param {number} decreaseDuration - Decrease duration in seconds (global; see _resolveDurations)
      * @private
      */
     async _updateSingleMonitor(monitor, now, allowStaticBrightness,
-                               globalIncreaseDuration, globalDecreaseDuration) {
+                               increaseDuration, decreaseDuration) {
         const { lightBrightness, darkBrightness } = monitor;
 
         if (lightBrightness === null || darkBrightness === null) {
             return; // Skip monitors without brightness values
         }
 
-        // Use monitor's own durations if available, otherwise use global
-        // (For this release, we copy global values to all monitors, but this keeps it flexible)
-        const increaseDuration = monitor.increaseDuration ?? globalIncreaseDuration;
-        const decreaseDuration = monitor.decreaseDuration ?? globalDecreaseDuration;
-
-        // Calculate target brightness for this monitor
+        // Calculate target brightness for this monitor, ramping from the
+        // anchor (actual brightness at window start) when one was captured
         const transitionalBrightness = this.calculateBrightness(
             now, lightBrightness, darkBrightness,
-            increaseDuration, decreaseDuration
+            increaseDuration, decreaseDuration,
+            this.getTransitionAnchor(monitor.id)
         );
 
         let targetBrightness;
@@ -478,15 +495,88 @@ export class BrightnessController {
     }
 
     /**
+     * Resolve the gradual transition durations (in seconds) to use for the
+     * brightness math. Always the GLOBAL settings — the same values
+     * scheduleBrightnessUpdates() uses to decide when to start and stop the loop.
+     *
+     * The per-monitor `increaseDuration`/`decreaseDuration` fields are
+     * intentionally ignored. They are a one-time snapshot copied from the global
+     * default when a monitor is first detected (displayManager/migrationManager)
+     * and nothing in the UI ever updates them. The old
+     * `monitor.increaseDuration ?? global` fallback honored that stale snapshot,
+     * which desynced calculateBrightness from the scheduler: after the user
+     * lowered the global duration, the loop started at `lightTime - globalDuration`
+     * but the ramp was computed over the longer stale per-monitor duration, so the
+     * first tick jumped partway up the curve instead of starting at darkBrightness.
+     *
+     * @param {Object} [_monitor] - accepted for call-site symmetry; unused.
+     * @returns {{increaseDuration: number, decreaseDuration: number}} durations in seconds
+     * @private
+     */
+    _resolveDurations(_monitor) {
+        return {
+            increaseDuration: this._settings.get_int('gradual-brightness-increase-duration'),
+            decreaseDuration: this._settings.get_int('gradual-brightness-decrease-duration'),
+        };
+    }
+
+    /**
+     * Read each enabled monitor's ACTUAL current brightness and store it as the
+     * ramp anchor for the transition window that is starting. Failures are
+     * per-monitor and non-fatal: a monitor without an anchor simply falls back
+     * to the legacy configured-endpoint ramp in calculateBrightness().
+     * @private
+     */
+    async _captureTransitionAnchors() {
+        // Extension may have been disabled while this chain was pending
+        if (!this._settings) {
+            return;
+        }
+
+        this._transitionAnchors.clear();
+
+        const monitors = this._loadEnabledMonitors();
+        await Promise.allSettled(monitors.map(async monitor => {
+            try {
+                const controller = await this._getOrCreateController(monitor);
+                const current = await controller.getBrightness();
+                if (typeof current === 'number' && current >= 1 && current <= 100) {
+                    this._transitionAnchors.set(monitor.id, current);
+                    console.log(`BrightnessController: ${monitor.name} - transition anchored at actual brightness ${current}%`);
+                } else {
+                    console.warn(`BrightnessController: ${monitor.name} - could not read brightness for anchor, using configured endpoint`);
+                }
+            } catch (e) {
+                console.warn(`BrightnessController: ${monitor.name} - anchor read failed: ${e.message || e}`);
+            }
+        }));
+    }
+
+    /**
+     * The ramp anchor captured for a monitor at the current window's start.
+     * @param {string} monitorId - Monitor id from settings
+     * @returns {number|null} Anchor brightness (1-100), or null if none captured
+     */
+    getTransitionAnchor(monitorId) {
+        return this._transitionAnchors.get(monitorId) ?? null;
+    }
+
+    /**
      * Calculate transitional brightness based on time of day.
+     *
+     * When an anchor is given, the ramp runs anchor -> target so the transition
+     * always starts from the brightness the screen is actually at (the user may
+     * have moved the slider since the configured value was applied). Without an
+     * anchor it falls back to configured-endpoint -> target.
      * @param {Date} now - Current time
      * @param {number} lightBrightness - Target brightness during light mode
      * @param {number} darkBrightness - Target brightness during dark mode
      * @param {number} increaseDuration - Duration in seconds for brightness increase
      * @param {number} decreaseDuration - Duration in seconds for brightness decrease
+     * @param {number|null} [anchorBrightness] - Actual brightness at window start
      * @returns {number|null} Calculated brightness (1-100) or null if not in transition window
      */
-    calculateBrightness(now, lightBrightness, darkBrightness, increaseDuration, decreaseDuration) {
+    calculateBrightness(now, lightBrightness, darkBrightness, increaseDuration, decreaseDuration, anchorBrightness = null) {
         const lightTime = this._lightTime;
         const darkTime = this._darkTime;
 
@@ -510,7 +600,8 @@ export class BrightnessController {
                 if (now >= dimStartTime && now < darkTime) {
                     const elapsed = now.getTime() - dimStartTime.getTime();
                     const progress = elapsed / decreaseDurationMs;
-                    const brightness = lightBrightness + (darkBrightness - lightBrightness) * progress;
+                    const startBrightness = anchorBrightness ?? lightBrightness;
+                    const brightness = startBrightness + (darkBrightness - startBrightness) * progress;
                     return Math.round(Math.max(1, Math.min(100, brightness)));
                 } else {
                     return null;
@@ -530,7 +621,8 @@ export class BrightnessController {
                 if (now >= brightenStartTime && now < nextLightTime) {
                     const elapsed = now.getTime() - brightenStartTime.getTime();
                     const progress = elapsed / increaseDurationMs;
-                    const brightness = darkBrightness + (lightBrightness - darkBrightness) * progress;
+                    const startBrightness = anchorBrightness ?? darkBrightness;
+                    const brightness = startBrightness + (lightBrightness - startBrightness) * progress;
                     return Math.round(Math.max(1, Math.min(100, brightness)));
                 } else {
                     return null;
@@ -593,6 +685,7 @@ export class BrightnessController {
         // Clear controller cache
         this._controllerCache.clear();
         this._lastAppliedBrightness.clear();
+        this._transitionAnchors.clear();
 
         // Clear all state to prevent memory leaks
         this._settings = null;

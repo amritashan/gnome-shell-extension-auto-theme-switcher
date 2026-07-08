@@ -5,6 +5,27 @@
  * and custom time strings (HH:MM format).
  */
 
+/**
+ * Seconds remaining until an absolute event timestamp, clamped to >= 0.
+ *
+ * The debug/status pipeline stores the ABSOLUTE next-event timestamp and
+ * derives the countdown at read time with this helper. (A relative
+ * seconds-to-event value computed at schedule time goes stale immediately —
+ * the prefs Status tab used to re-anchor such a stale delta to a fresh "now",
+ * freezing the countdown at whatever it was when the schedule was last built.)
+ *
+ * @param {number} eventTimestampMs - Event time as epoch milliseconds
+ * @param {number} nowMs - Current time as epoch milliseconds
+ * @returns {number} Whole seconds remaining, 0 if the event has passed or the
+ *                   timestamp is missing/invalid
+ */
+export function secondsUntilEvent(eventTimestampMs, nowMs) {
+    if (!eventTimestampMs || !Number.isFinite(eventTimestampMs)) {
+        return 0;
+    }
+    return Math.max(0, Math.round((eventTimestampMs - nowMs) / 1000));
+}
+
 export class TimeCalculator {
     /**
      * Parse a trigger setting and return the corresponding time

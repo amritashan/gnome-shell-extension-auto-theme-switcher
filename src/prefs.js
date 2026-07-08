@@ -1466,7 +1466,12 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
                     this._debugLabels.nextEvent.set_label(debugInfo.nextEventTime || 'N/A');
                     this._debugLabels.nextEventType.set_label(debugInfo.nextEventType || 'N/A');
 
-                    if (debugInfo.secondsToNextEvent) {
+                    if (debugInfo.nextEventTimestamp) {
+                        // Absolute event time: the per-second countdown ticks
+                        // toward it instead of re-anchoring a relative delta
+                        // (which froze the countdown at its schedule-time value).
+                        this._nextEventTimestamp = debugInfo.nextEventTimestamp;
+                    } else if (debugInfo.secondsToNextEvent) {
                         const now = new Date();
                         this._nextEventTimestamp = now.getTime() + (debugInfo.secondsToNextEvent * MS_PER_SECOND);
                     }

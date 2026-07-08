@@ -27,6 +27,9 @@ build_extension() {
     # Remove compiled schemas (not needed for GNOME 45+, causes EGO rejection)
     rm -f "$BUILD_DIR/schemas/gschemas.compiled"
 
+    # Remove tests — development-only, not part of the shipped extension
+    rm -rf "$BUILD_DIR/tests"
+
     echo ""
     echo "Build complete! Files in $BUILD_DIR:"
     ls -lh "$BUILD_DIR"/*.js "$BUILD_DIR"/*.json 2>/dev/null || true

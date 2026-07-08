@@ -34,6 +34,9 @@ build_extension() {
     echo "Copying all files from $SRC_DIR/ to $BUILD_DIR/..."
     cp -rv "$SRC_DIR"/* "$BUILD_DIR/"
 
+    # Remove tests — development-only, not part of the shipped extension
+    rm -rf "$BUILD_DIR/tests"
+
     # Patch metadata.json for dev version
     echo ""
     echo "Patching metadata.json for dev..."

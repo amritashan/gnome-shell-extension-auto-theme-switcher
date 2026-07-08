@@ -9,7 +9,7 @@ import {
 import { BrightnessController } from './brightnessController.js';
 import { ThemeController } from './themeController.js';
 import { SolarCalculator } from './solarCalculator.js';
-import { TimeCalculator } from './timeCalculator.js';
+import { TimeCalculator, secondsUntilEvent } from './timeCalculator.js';
 
 export class ExtensionController {
     constructor(extension) {
@@ -257,6 +257,12 @@ export class ExtensionController {
         // pause its countdown and show "Manual override active" instead of stale auto
         // schedule values. Spreading into a new object so we don't mutate _debugInfo.
         const info = { ...(this._debugInfo || {}) };
+        // The stored secondsToNextEvent is a snapshot from when the schedule was
+        // built (hours ago, typically) — recompute from the absolute timestamp so
+        // the Status tab countdown reflects the time remaining NOW.
+        if (info.nextEventTimestamp) {
+            info.secondsToNextEvent = secondsUntilEvent(info.nextEventTimestamp, Date.now());
+        }
         info.manualModeActive = this._manualModeActive;
         info.manualModeIsDark = this._manualModeIsDark;
         return JSON.stringify(info);
@@ -483,6 +489,9 @@ export class ExtensionController {
         const secondsToNextEvent = Math.round((nextEventTime.getTime() - now.getTime()) / MS_PER_SECOND);
 
         this._debugInfo.nextEventTime = nextEventTime.toLocaleString();
+        // Absolute timestamp is the source of truth for the countdown;
+        // getDebugInfo() derives fresh remaining seconds from it at read time.
+        this._debugInfo.nextEventTimestamp = nextEventTime.getTime();
         this._debugInfo.secondsToNextEvent = secondsToNextEvent;
         this._debugInfo.nextEventType = switchToDark ? 'dark' : 'light';
 
@@ -556,7 +565,8 @@ export class ExtensionController {
                         const increaseDuration = this._settings.get_int('gradual-brightness-increase-duration');
 
                         currentBrightness = this._brightnessController.calculateBrightness(
-                            now, lightBrightness, darkBrightness, increaseDuration, decreaseDuration
+                            now, lightBrightness, darkBrightness, increaseDuration, decreaseDuration,
+                            this._brightnessController.getTransitionAnchor(monitor.id)
                         );
                     }
 
@@ -718,6 +728,7 @@ export class ExtensionController {
             darkModeTrigger: darkTrigger,
             currentMode: existingDebugInfo.currentMode || 'N/A',
             nextEventTime: existingDebugInfo.nextEventTime || 'N/A',
+            nextEventTimestamp: existingDebugInfo.nextEventTimestamp || 0,
             secondsToNextEvent: existingDebugInfo.secondsToNextEvent || 0,
             nextEventType: existingDebugInfo.nextEventType || 'N/A',
             latitude: latitude || 'Not set',
