@@ -8,6 +8,9 @@ build-dev/
 # Compiled schemas (generated during build)
 src/schemas/gschemas.compiled
 
+# Serena MCP server local state
+.serena/
+
 # Editor/IDE files
 .vscode/
 .idea/
