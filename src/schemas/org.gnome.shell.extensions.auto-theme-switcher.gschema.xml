@@ -216,5 +216,14 @@
       </description>
     </key>
 
+    <key name="debug-logging" type="b">
+      <default>false</default>
+      <summary>Enable debug logging</summary>
+      <description>
+        When enabled, the extension writes verbose diagnostic messages to the
+        system journal. Off by default to keep the journal quiet.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

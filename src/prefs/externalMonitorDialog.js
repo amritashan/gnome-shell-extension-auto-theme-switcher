@@ -5,6 +5,7 @@ import { DisplayManager } from './displayManager.js';
 import { DdcutilDisplay, probeDisplayController } from '../displayController.js';
 import { BrightnessSliderRow } from './brightnessSliderRow.js';
 import { BRIGHTNESS_TRANSITION_DURATIONS } from '../constants.js';
+import { debugLog, debugWarn } from '../logger.js';
 
 /**
  * Dialog window for configuring all monitor brightness control.
@@ -624,7 +625,7 @@ export class MonitorConfigDialog {
      */
     async _refreshMonitors() {
         if (this.detectionInProgress) {
-            console.log('MonitorConfigDialog: Detection already in progress');
+            debugLog('MonitorConfigDialog: Detection already in progress');
             return;
         }
 
@@ -668,7 +669,7 @@ export class MonitorConfigDialog {
             // Check for newly detected monitors
             const newMonitors = allMonitors.filter(m => !m.initialized && m.type !== 'brightnessctl');
             if (newMonitors.length > 0) {
-                console.log(`MonitorConfigDialog: Found ${newMonitors.length} new external monitors`);
+                debugLog(`MonitorConfigDialog: Found ${newMonitors.length} new external monitors`);
             }
 
             // Save merged list
@@ -897,22 +898,22 @@ export class MonitorConfigDialog {
 
             enableSwitch.connect('notify::active', async () => {
                 const isActive = enableSwitch.get_active();
-                console.log(`[MonitorConfigDialog] Switch toggled for ${monitor.name}: active=${isActive}, isInitializing=${isInitializing}`);
+                debugLog(`[MonitorConfigDialog] Switch toggled for ${monitor.name}: active=${isActive}, isInitializing=${isInitializing}`);
 
                 if (isActive && !isInitializing) {
                     isInitializing = true;
 
                     // Disable switch during initialization to prevent double-toggling
                     enableSwitch.set_sensitive(false);
-                    console.log(`[MonitorConfigDialog] Starting initialization for ${monitor.name}...`);
+                    debugLog(`[MonitorConfigDialog] Starting initialization for ${monitor.name}...`);
 
                     try {
                         // First time enabling - initialize
                         await this._initializeMonitor(monitor, actionRow);
-                        console.log(`[MonitorConfigDialog] Initialization successful for ${monitor.name}`);
+                        debugLog(`[MonitorConfigDialog] Initialization successful for ${monitor.name}`);
                     } catch (e) {
                         console.error(`[MonitorConfigDialog] Initialization failed for ${monitor.name}: ${e}`);
-                        console.error(`[MonitorConfigDialog] Error stack: ${e.stack}`);
+                        debugWarn(`[MonitorConfigDialog] Error stack: ${e.stack}`);
 
                         // If initialization fails, revert the switch
                         enableSwitch.set_active(false);
@@ -920,10 +921,10 @@ export class MonitorConfigDialog {
                         // Re-enable the switch
                         enableSwitch.set_sensitive(true);
                         isInitializing = false;
-                        console.log(`[MonitorConfigDialog] Initialization completed for ${monitor.name}, isInitializing=${isInitializing}`);
+                        debugLog(`[MonitorConfigDialog] Initialization completed for ${monitor.name}, isInitializing=${isInitializing}`);
                     }
                 } else if (!isActive) {
-                    console.log(`[MonitorConfigDialog] Switch turned off for ${monitor.name} (ignoring)`);
+                    debugLog(`[MonitorConfigDialog] Switch turned off for ${monitor.name} (ignoring)`);
                 }
             });
 
@@ -1158,9 +1159,9 @@ export class MonitorConfigDialog {
      * @private
      */
     async _initializeMonitor(monitor, actionRow) {
-        console.log(`[MonitorConfigDialog] _initializeMonitor called for ${monitor.name}`);
-        console.log(`[MonitorConfigDialog] Monitor state: enabled=${monitor.enabled}, initialized=${monitor.initialized}`);
-        console.log(`[MonitorConfigDialog] Monitor details: id=${monitor.id}, displayNumber=${monitor.displayNumber}, i2cBus=${monitor.i2cBus}`);
+        debugLog(`[MonitorConfigDialog] _initializeMonitor called for ${monitor.name}`);
+        debugLog(`[MonitorConfigDialog] Monitor state: enabled=${monitor.enabled}, initialized=${monitor.initialized}`);
+        debugLog(`[MonitorConfigDialog] Monitor details: id=${monitor.id}, displayNumber=${monitor.displayNumber}, i2cBus=${monitor.i2cBus}`);
 
         // Show progress
         const toast = new Adw.Toast({
@@ -1170,19 +1171,19 @@ export class MonitorConfigDialog {
         this.toastOverlay.add_toast(toast);
 
         try {
-            console.log(`[MonitorConfigDialog] Probing controller for ${monitor.name}...`);
+            debugLog(`[MonitorConfigDialog] Probing controller for ${monitor.name}...`);
             const controller = await probeDisplayController(monitor, this.settings);
 
             // Read current brightness
-            console.log(`[MonitorConfigDialog] Calling getBrightness()...`);
+            debugLog(`[MonitorConfigDialog] Calling getBrightness()...`);
             const currentBrightness = await controller.getBrightness();
-            console.log(`[MonitorConfigDialog] getBrightness() returned: ${currentBrightness}`);
+            debugLog(`[MonitorConfigDialog] getBrightness() returned: ${currentBrightness}`);
 
             if (currentBrightness === null) {
                 throw new Error('Failed to read brightness from monitor');
             }
 
-            console.log(`[MonitorConfigDialog] Current brightness for ${monitor.name}: ${currentBrightness}%`);
+            debugLog(`[MonitorConfigDialog] Current brightness for ${monitor.name}: ${currentBrightness}%`);
 
             // Set both light and dark to current brightness (safe default)
             monitor.lightBrightness = currentBrightness;
@@ -1190,16 +1191,16 @@ export class MonitorConfigDialog {
             monitor.initialized = true;
             monitor.enabled = true;
 
-            console.log(`[MonitorConfigDialog] Updated monitor state: enabled=${monitor.enabled}, initialized=${monitor.initialized}, brightness=${currentBrightness}`);
+            debugLog(`[MonitorConfigDialog] Updated monitor state: enabled=${monitor.enabled}, initialized=${monitor.initialized}, brightness=${currentBrightness}`);
 
             // Update monitor in map (in case it was cleared during refresh)
             this.monitors.set(monitor.id, monitor);
-            console.log(`[MonitorConfigDialog] Monitor added to map, map size: ${this.monitors.size}`);
+            debugLog(`[MonitorConfigDialog] Monitor added to map, map size: ${this.monitors.size}`);
 
             // Save
-            console.log(`[MonitorConfigDialog] Saving monitors...`);
+            debugLog(`[MonitorConfigDialog] Saving monitors...`);
             this._saveMonitors();
-            console.log(`[MonitorConfigDialog] Monitors saved successfully`);
+            debugLog(`[MonitorConfigDialog] Monitors saved successfully`);
 
             // Dismiss progress toast
             toast.dismiss();
@@ -1212,7 +1213,7 @@ export class MonitorConfigDialog {
             this.toastOverlay.add_toast(successToast);
 
             // Rebuild the row with controls
-            console.log(`[MonitorConfigDialog] Rebuilding row with controls...`);
+            debugLog(`[MonitorConfigDialog] Rebuilding row with controls...`);
 
             // Determine which group and creation method to use based on monitor type
             const isBuiltin = monitor.type === 'brightnessctl';
@@ -1227,12 +1228,12 @@ export class MonitorConfigDialog {
             if (!isBuiltin && newRow.set_expanded) {
                 newRow.set_expanded(true);
             }
-            console.log(`[MonitorConfigDialog] Row rebuilt successfully`);
+            debugLog(`[MonitorConfigDialog] Row rebuilt successfully`);
 
         } catch (e) {
             console.error(`[MonitorConfigDialog] EXCEPTION in _initializeMonitor for ${monitor.name}: ${e}`);
-            console.error(`[MonitorConfigDialog] Exception message: ${e.message}`);
-            console.error(`[MonitorConfigDialog] Exception stack: ${e.stack}`);
+            debugWarn(`[MonitorConfigDialog] Exception message: ${e.message}`);
+            debugWarn(`[MonitorConfigDialog] Exception stack: ${e.stack}`);
 
             toast.dismiss();
 
@@ -1257,7 +1258,7 @@ export class MonitorConfigDialog {
         monitor.enabled = enabled;
         this._saveMonitors();
 
-        console.log(`MonitorConfigDialog: ${monitor.name} ${enabled ? 'enabled' : 'disabled'}`);
+        debugLog(`MonitorConfigDialog: ${monitor.name} ${enabled ? 'enabled' : 'disabled'}`);
 
         // Update subtitle
         const row = this.monitorRows.get(monitor.id);
@@ -1273,7 +1274,7 @@ export class MonitorConfigDialog {
     _saveMonitors() {
         const allMonitors = Array.from(this.monitors.values());
         allMonitors.forEach(m => {
-            console.log(`MonitorConfigDialog: Saving monitor: id=${m.id}, enabled=${m.enabled}, initialized=${m.initialized}, lightBrightness=${m.lightBrightness}, darkBrightness=${m.darkBrightness}`);
+            debugLog(`MonitorConfigDialog: Saving monitor: id=${m.id}, enabled=${m.enabled}, initialized=${m.initialized}, lightBrightness=${m.lightBrightness}, darkBrightness=${m.darkBrightness}`);
         });
         this.displayManager.saveMonitors(allMonitors);
     }

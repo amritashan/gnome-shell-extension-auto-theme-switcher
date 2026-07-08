@@ -10,6 +10,7 @@ import {
     MS_PER_SECOND,
 } from './constants.js';
 import { MonitorConfigDialog } from './prefs/externalMonitorDialog.js';
+import { debugLog, debugWarn, setDebugLogging } from './logger.js';
 
 export default class ThemeSwitcherPreferences extends ExtensionPreferences {
     /**
@@ -63,7 +64,7 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
                 }
             } catch (e) {
                 // Directory doesn't exist or isn't readable - skip it
-                console.log(`Prefs: Could not read theme directory ${dirPath}: ${e.message}`);
+                debugLog(`Prefs: Could not read theme directory ${dirPath}: ${e.message}`);
             }
         }
 
@@ -72,11 +73,18 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
     }
 
     fillPreferencesWindow(window) {
-        console.log('Prefs: fillPreferencesWindow called');
+        debugLog('Prefs: fillPreferencesWindow called');
         this.settings = this.getSettings();
         this._settingsSignalIds = [];  // Track settings signals for cleanup
         this._locationSession = null;  // Track Soup.Session for cleanup
-        console.log(`Prefs: Got settings with schema: ${this.settings.schema_id}`);
+
+        // The prefs process has its own logger instance — sync it with the
+        // setting now and on every change from the Status-tab toggle.
+        setDebugLogging(this.settings.get_boolean('debug-logging'));
+        this._settingsSignalIds.push(this.settings.connect('changed::debug-logging', () => {
+            setDebugLogging(this.settings.get_boolean('debug-logging'));
+        }));
+        debugLog(`Prefs: Got settings with schema: ${this.settings.schema_id}`);
 
         const page = new Adw.PreferencesPage({
             title: 'Settings',
@@ -1066,6 +1074,22 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         refreshRow.add_suffix(refreshButton);
         testGroup.add(refreshRow);
 
+        // Debug logging toggle: routine diagnostics are gated off by default to
+        // keep the journal quiet (EGO "No excessive logging"); flip this on when
+        // capturing logs for a bug report.
+        const debugLoggingRow = new Adw.ActionRow({
+            title: 'Debug Logging',
+            subtitle: 'Write verbose diagnostics to the system journal',
+        });
+        const debugLoggingToggle = new Gtk.Switch({
+            active: this.settings.get_boolean('debug-logging'),
+            valign: Gtk.Align.CENTER,
+        });
+        this.settings.bind('debug-logging', debugLoggingToggle, 'active', Gio.SettingsBindFlags.DEFAULT);
+        debugLoggingRow.add_suffix(debugLoggingToggle);
+        debugLoggingRow.activatable_widget = debugLoggingToggle;
+        testGroup.add(debugLoggingRow);
+
         window.add(debugPage);
 
         // --- About Page ---
@@ -1320,7 +1344,7 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
                         // Update expander subtitle
                         expander.set_subtitle(locationName);
 
-                        console.log(`Prefs: Auto-detected location: ${locationName} (${latitude}, ${longitude})`);
+                        debugLog(`Prefs: Auto-detected location: ${locationName} (${latitude}, ${longitude})`);
 
                         spinner.stop();
                         spinner.visible = false;
@@ -1365,7 +1389,7 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
                         locationName = parts.join(', ') || 'Location detected';
                     }
                 } catch (geoError) {
-                    console.warn(`Prefs: Reverse geocoding failed: ${geoError.message}`);
+                    debugWarn(`Prefs: Reverse geocoding failed: ${geoError.message}`);
                 }
                 callback(locationName);
             }
@@ -1617,10 +1641,10 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         try {
             const path = GLib.find_program_in_path('brightnessctl');
             const result = path !== null;
-            console.log(`Prefs: brightnessctl check result: ${result} (path: ${path})`);
+            debugLog(`Prefs: brightnessctl check result: ${result} (path: ${path})`);
             return result;
         } catch (e) {
-            console.log(`Prefs: brightnessctl check failed: ${e.message}`);
+            debugLog(`Prefs: brightnessctl check failed: ${e.message}`);
             return false;
         }
     }

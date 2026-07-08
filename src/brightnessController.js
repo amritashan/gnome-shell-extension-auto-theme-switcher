@@ -6,6 +6,7 @@ import {
     MS_PER_DAY
 } from './constants.js';
 import { probeDisplayController } from './displayController.js';
+import { debugLog, debugWarn } from './logger.js';
 
 export class BrightnessController {
     constructor(settings) {
@@ -54,7 +55,7 @@ export class BrightnessController {
             const monitors = JSON.parse(json);
             return monitors.filter(m => m.enabled && m.initialized);
         } catch (e) {
-            console.warn('BrightnessController: Failed to load monitors:', e);
+            debugWarn('BrightnessController: Failed to load monitors:', e);
             return [];
         }
     }
@@ -82,7 +83,7 @@ export class BrightnessController {
      * @private
      */
     _invalidateControllerCache() {
-        console.log('BrightnessController: Invalidating controller cache due to settings change');
+        debugLog('BrightnessController: Invalidating controller cache due to settings change');
         this._controllerCache.clear();
         // Also drop the last-applied brightness cache. The user may have changed
         // their light/dark brightness values in prefs, which means our previous
@@ -125,7 +126,7 @@ export class BrightnessController {
             if (target === null) return;
 
             if (this._lastAppliedBrightness.get(monitor.id) === target) {
-                console.log(`BrightnessController: manual mode — ${monitor.name} already at ${target}%, skipping write`);
+                debugLog(`BrightnessController: manual mode — ${monitor.name} already at ${target}%, skipping write`);
                 return;
             }
 
@@ -134,12 +135,12 @@ export class BrightnessController {
                 const success = await controller.setBrightness(target);
                 if (success) {
                     this._lastAppliedBrightness.set(monitor.id, target);
-                    console.log(`BrightnessController: manual ${isDark ? 'dark' : 'light'} mode — set ${monitor.name} to ${target}%`);
+                    debugLog(`BrightnessController: manual ${isDark ? 'dark' : 'light'} mode — set ${monitor.name} to ${target}%`);
                 } else {
-                    console.warn(`BrightnessController: manual mode — ${monitor.name} setBrightness returned false`);
+                    debugWarn(`BrightnessController: manual mode — ${monitor.name} setBrightness returned false`);
                 }
             } catch (e) {
-                console.warn(`BrightnessController: manual mode — failed to set ${monitor.name}: ${e.message || e}`);
+                debugWarn(`BrightnessController: manual mode — failed to set ${monitor.name}: ${e.message || e}`);
             }
         });
 
@@ -155,12 +156,12 @@ export class BrightnessController {
 
         const controlBrightness = this._settings.get_boolean('control-brightness');
         if (!controlBrightness) {
-            console.log('BrightnessController: Brightness control disabled, not scheduling updates');
+            debugLog('BrightnessController: Brightness control disabled, not scheduling updates');
             return;
         }
 
         if (!this._lightTime || !this._darkTime) {
-            console.log('BrightnessController: Light/dark times not set, not scheduling updates');
+            debugLog('BrightnessController: Light/dark times not set, not scheduling updates');
             return;
         }
 
@@ -169,7 +170,7 @@ export class BrightnessController {
         const gradualIncreaseEnabled = this._settings.get_boolean('gradual-brightness-increase-enabled');
 
         if (!gradualDecreaseEnabled && !gradualIncreaseEnabled) {
-            console.log('BrightnessController: Both gradual adjustments disabled, not scheduling updates');
+            debugLog('BrightnessController: Both gradual adjustments disabled, not scheduling updates');
             return;
         }
 
@@ -247,13 +248,13 @@ export class BrightnessController {
         if (secondsUntilWindowStart > 0) {
             const hours = Math.floor(secondsUntilWindowStart / 3600);
             const minutes = Math.floor((secondsUntilWindowStart % 3600) / 60);
-            console.log(`BrightnessController: Scheduling brightness update loop to start in ${hours}h ${minutes}m`);
+            debugLog(`BrightnessController: Scheduling brightness update loop to start in ${hours}h ${minutes}m`);
             this._brightnessTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secondsUntilWindowStart, () => {
                 this._startBrightnessUpdateLoop(nextWindowEnd, windowDurationMs);
                 return GLib.SOURCE_REMOVE;
             });
         } else {
-            console.log('BrightnessController: Starting brightness update loop immediately (already in window)');
+            debugLog('BrightnessController: Starting brightness update loop immediately (already in window)');
             this._startBrightnessUpdateLoop(nextWindowEnd, windowDurationMs);
         }
     }
@@ -262,7 +263,7 @@ export class BrightnessController {
         // Calculate optimal update interval for smooth transitions
         const updateIntervalSeconds = this._calculateUpdateInterval(windowDurationMs);
 
-        console.log(`BrightnessController: Starting update loop (window ends at ${windowEnd.toLocaleString()}, interval=${updateIntervalSeconds}s)`);
+        debugLog(`BrightnessController: Starting update loop (window ends at ${windowEnd.toLocaleString()}, interval=${updateIntervalSeconds}s)`);
 
         // Anchor the ramp at each monitor's ACTUAL brightness before the first
         // write, then update (fire-and-forget async). If the user manually
@@ -276,7 +277,7 @@ export class BrightnessController {
 
         // Clear any existing timer
         if (this._brightnessTimeoutId) {
-            console.log('BrightnessController: Removing existing timer before starting new loop');
+            debugLog('BrightnessController: Removing existing timer before starting new loop');
             GLib.source_remove(this._brightnessTimeoutId);
             this._brightnessTimeoutId = null;
         }
@@ -287,7 +288,7 @@ export class BrightnessController {
 
             if (now >= windowEnd) {
                 // Window has ended - schedule next window AFTER this timer is fully cleaned up
-                console.log('BrightnessController: Update window ended, stopping timer and rescheduling');
+                debugLog('BrightnessController: Update window ended, stopping timer and rescheduling');
                 // Anchors are only meaningful within the window they were captured in
                 this._transitionAnchors.clear();
                 // Use idle_add to defer the rescheduling until the next event loop iteration
@@ -305,7 +306,7 @@ export class BrightnessController {
             });
             return GLib.SOURCE_CONTINUE;
         });
-        console.log(`BrightnessController: Timer scheduled with ID ${this._brightnessTimeoutId}`);
+        debugLog(`BrightnessController: Timer scheduled with ID ${this._brightnessTimeoutId}`);
     }
 
     /**
@@ -353,23 +354,23 @@ export class BrightnessController {
             return;
         }
 
-        console.log(`BrightnessController: updateBrightness called (allowStaticBrightness=${allowStaticBrightness})`);
+        debugLog(`BrightnessController: updateBrightness called (allowStaticBrightness=${allowStaticBrightness})`);
 
         const controlBrightness = this._settings.get_boolean('control-brightness');
         if (!controlBrightness || !this._lightTime || !this._darkTime) {
-            console.log('BrightnessController: Skipping update - control disabled or times not set');
+            debugLog('BrightnessController: Skipping update - control disabled or times not set');
             return;
         }
 
         // Load all enabled monitors
         const monitors = this._loadEnabledMonitors();
         if (monitors.length === 0) {
-            console.log('BrightnessController: Skipping update - no enabled monitors');
+            debugLog('BrightnessController: Skipping update - no enabled monitors');
             return; // No monitors to update
         }
 
         const now = new Date();
-        console.log(`BrightnessController: Updating ${monitors.length} monitor(s) at ${now.toLocaleString()}`);
+        debugLog(`BrightnessController: Updating ${monitors.length} monitor(s) at ${now.toLocaleString()}`);
 
         // Resolve the transition durations once — same global values the
         // scheduler uses, so the loop's math can't drift from the loop's timing.
@@ -387,7 +388,7 @@ export class BrightnessController {
         // Log any failures
         const failures = results.filter(r => r.status === 'rejected');
         if (failures.length > 0) {
-            console.warn(`BrightnessController: ${failures.length} monitor(s) failed to update`);
+            debugWarn(`BrightnessController: ${failures.length} monitor(s) failed to update`);
         }
 
         // Update timestamp after successful updates
@@ -425,7 +426,7 @@ export class BrightnessController {
 
         let targetBrightness;
         if (transitionalBrightness !== null) {
-            console.log(`BrightnessController: ${monitor.name} - in transition, target=${transitionalBrightness}%`);
+            debugLog(`BrightnessController: ${monitor.name} - in transition, target=${transitionalBrightness}%`);
             targetBrightness = transitionalBrightness;
         } else if (allowStaticBrightness) {
             // Defensive backstop: never apply static brightness while we're inside a
@@ -437,14 +438,14 @@ export class BrightnessController {
             // an edge state (boundary, settings race) — better to defer to the next
             // loop tick than to write a wrong value.
             if (this.isInTransitionWindow()) {
-                console.warn(`BrightnessController: ${monitor.name} - calc returned null while inside transition window, deferring to loop`);
+                debugWarn(`BrightnessController: ${monitor.name} - calc returned null while inside transition window, deferring to loop`);
                 return;
             }
             const inDayPeriod = now >= this._lightTime && now < this._darkTime;
             targetBrightness = inDayPeriod ? lightBrightness : darkBrightness;
-            console.log(`BrightnessController: ${monitor.name} - static brightness allowed, target=${targetBrightness}%`);
+            debugLog(`BrightnessController: ${monitor.name} - static brightness allowed, target=${targetBrightness}%`);
         } else {
-            console.log(`BrightnessController: ${monitor.name} - not in transition and static not allowed, skipping`);
+            debugLog(`BrightnessController: ${monitor.name} - not in transition and static not allowed, skipping`);
             return; // Not in transition window and static not allowed
         }
 
@@ -452,7 +453,7 @@ export class BrightnessController {
         // EEPROM cycles and the ~200-500ms cost of the ddcutil subprocess on each
         // event-driven re-application (lock/unlock, monitors-changed, etc.).
         if (this._lastAppliedBrightness.get(monitor.id) === targetBrightness) {
-            console.log(`BrightnessController: ${monitor.name} already at ${targetBrightness}%, skipping write`);
+            debugLog(`BrightnessController: ${monitor.name} already at ${targetBrightness}%, skipping write`);
             if (monitor.consecutiveFailures) {
                 monitor.consecutiveFailures = 0;
             }
@@ -467,12 +468,12 @@ export class BrightnessController {
             if (!success) {
                 // setBrightness returned false (e.g. monitor not found in Mutter)
                 monitor.consecutiveFailures = (monitor.consecutiveFailures || 0) + 1;
-                console.warn(`BrightnessController: ${monitor.name} not available (failure #${monitor.consecutiveFailures})`);
+                debugWarn(`BrightnessController: ${monitor.name} not available (failure #${monitor.consecutiveFailures})`);
                 throw new Error(`Monitor ${monitor.name} not available`);
             }
 
             this._lastAppliedBrightness.set(monitor.id, targetBrightness);
-            console.log(`BrightnessController: Updated ${monitor.name} to ${targetBrightness}%`);
+            debugLog(`BrightnessController: Updated ${monitor.name} to ${targetBrightness}%`);
 
             // Reset failure counter on success
             if (monitor.consecutiveFailures) {
@@ -483,10 +484,10 @@ export class BrightnessController {
             if (!monitor.consecutiveFailures) {
                 monitor.consecutiveFailures = (monitor.consecutiveFailures || 0) + 1;
             }
-            console.warn(`BrightnessController: Failed to update ${monitor.name} (failure #${monitor.consecutiveFailures}): ${e.message}`);
+            debugWarn(`BrightnessController: Failed to update ${monitor.name} (failure #${monitor.consecutiveFailures}): ${e.message}`);
 
             if (monitor.consecutiveFailures >= 3) {
-                console.warn(`BrightnessController: ${monitor.name} has failed ${monitor.consecutiveFailures} times - monitor may be unplugged`);
+                debugWarn(`BrightnessController: ${monitor.name} has failed ${monitor.consecutiveFailures} times - monitor may be unplugged`);
             }
 
             // Re-throw to mark this promise as rejected
@@ -542,12 +543,12 @@ export class BrightnessController {
                 const current = await controller.getBrightness();
                 if (typeof current === 'number' && current >= 1 && current <= 100) {
                     this._transitionAnchors.set(monitor.id, current);
-                    console.log(`BrightnessController: ${monitor.name} - transition anchored at actual brightness ${current}%`);
+                    debugLog(`BrightnessController: ${monitor.name} - transition anchored at actual brightness ${current}%`);
                 } else {
-                    console.warn(`BrightnessController: ${monitor.name} - could not read brightness for anchor, using configured endpoint`);
+                    debugWarn(`BrightnessController: ${monitor.name} - could not read brightness for anchor, using configured endpoint`);
                 }
             } catch (e) {
-                console.warn(`BrightnessController: ${monitor.name} - anchor read failed: ${e.message || e}`);
+                debugWarn(`BrightnessController: ${monitor.name} - anchor read failed: ${e.message || e}`);
             }
         }));
     }

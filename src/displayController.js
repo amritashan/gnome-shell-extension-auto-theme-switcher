@@ -1,5 +1,6 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import { debugLog, debugWarn } from './logger.js';
 
 const GSD_POWER_BUS = 'org.gnome.SettingsDaemon.Power';
 const GSD_POWER_PATH = '/org/gnome/SettingsDaemon/Power';
@@ -116,7 +117,7 @@ export class BrightnessCtlDisplay extends DisplayController {
             const percentage = Math.round((current / max) * 100);
             return Math.max(1, Math.min(100, percentage));
         } catch (e) {
-            console.error(`BrightnessCtlDisplay: Failed to get brightness: ${e}`);
+            debugWarn(`BrightnessCtlDisplay: Failed to get brightness: ${e}`);
             return null;
         }
     }
@@ -209,30 +210,30 @@ export class DdcutilDisplay extends DisplayController {
      */
     async getBrightness() {
         try {
-            console.log(`[DdcutilDisplay] Reading brightness for ${this.displayInfo.name} (display ${this.displayNumber})...`);
+            debugLog(`[DdcutilDisplay] Reading brightness for ${this.displayInfo.name} (display ${this.displayNumber})...`);
 
             const proc = new Gio.Subprocess({
                 argv: ['ddcutil', 'getvcp', '10', '--display', String(this.displayNumber), '--brief'],
                 flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
             });
-            console.log(`[DdcutilDisplay] Subprocess created, initializing...`);
+            debugLog(`[DdcutilDisplay] Subprocess created, initializing...`);
             proc.init(null);
 
-            console.log(`[DdcutilDisplay] Starting communicate_utf8_async...`);
+            debugLog(`[DdcutilDisplay] Starting communicate_utf8_async...`);
             const [stdout, stderr] = await new Promise((resolve, reject) => {
                 proc.communicate_utf8_async(null, null, (proc, res) => {
                     try {
                         const [, stdout, stderr] = proc.communicate_utf8_finish(res);
-                        console.log(`[DdcutilDisplay] communicate_utf8_finish completed`);
+                        debugLog(`[DdcutilDisplay] communicate_utf8_finish completed`);
                         resolve([stdout, stderr]);
                     } catch (e) {
-                        console.error(`[DdcutilDisplay] communicate_utf8_finish error: ${e}`);
+                        debugWarn(`[DdcutilDisplay] communicate_utf8_finish error: ${e}`);
                         reject(e);
                     }
                 });
             });
 
-            console.log(`[DdcutilDisplay] Process completed`);
+            debugLog(`[DdcutilDisplay] Process completed`);
 
             // Check the actual exit status. ddcutil exits non-zero on permission
             // errors (user not in i2c group, missing udev rule), bus errors, or
@@ -241,14 +242,14 @@ export class DdcutilDisplay extends DisplayController {
             if (!proc.get_successful()) {
                 const status = proc.get_exit_status();
                 const detail = stderr && stderr.trim() ? stderr.trim() : '(no stderr)';
-                console.warn(`[DdcutilDisplay] ddcutil getvcp exited ${status} for ${this.displayInfo.name}: ${detail}`);
+                debugWarn(`[DdcutilDisplay] ddcutil getvcp exited ${status} for ${this.displayInfo.name}: ${detail}`);
                 return null;
             }
 
             const output = stdout.trim();
-            console.log(`[DdcutilDisplay] stdout: "${output}"`);
+            debugLog(`[DdcutilDisplay] stdout: "${output}"`);
             if (stderr && stderr.trim()) {
-                console.log(`[DdcutilDisplay] stderr: "${stderr.trim()}"`);
+                debugLog(`[DdcutilDisplay] stderr: "${stderr.trim()}"`);
             }
 
             // Parse output format: "VCP 10 C 50 100"
@@ -261,23 +262,23 @@ export class DdcutilDisplay extends DisplayController {
                 const maxValue = parseInt(match[2]);
 
                 if (isNaN(currentValue) || isNaN(maxValue) || maxValue === 0) {
-                    console.error(`[DdcutilDisplay] Invalid brightness values for ${this.displayInfo.name}:`,
+                    debugWarn(`[DdcutilDisplay] Invalid brightness values for ${this.displayInfo.name}:`,
                                   { currentValue, maxValue });
                     return null;
                 }
 
                 // Calculate percentage
                 const percentage = Math.round((currentValue / maxValue) * 100);
-                console.log(`[DdcutilDisplay] Current brightness for ${this.displayInfo.name}: ${percentage}%`);
+                debugLog(`[DdcutilDisplay] Current brightness for ${this.displayInfo.name}: ${percentage}%`);
                 return Math.max(0, Math.min(100, percentage));
             }
 
-            console.error(`[DdcutilDisplay] Could not parse ddcutil output for ${this.displayInfo.name}: ${output}`);
+            debugWarn(`[DdcutilDisplay] Could not parse ddcutil output for ${this.displayInfo.name}: ${output}`);
             return null;
         } catch (e) {
-            console.error(`[DdcutilDisplay] EXCEPTION in getBrightness for ${this.displayInfo.name}: ${e}`);
-            console.error(`[DdcutilDisplay] Exception message: ${e.message}`);
-            console.error(`[DdcutilDisplay] Exception stack: ${e.stack}`);
+            debugWarn(`[DdcutilDisplay] EXCEPTION in getBrightness for ${this.displayInfo.name}: ${e}`);
+            debugWarn(`[DdcutilDisplay] Exception message: ${e.message}`);
+            debugWarn(`[DdcutilDisplay] Exception stack: ${e.stack}`);
             return null;
         }
     }
@@ -293,7 +294,7 @@ export class DdcutilDisplay extends DisplayController {
             // Clamp value to valid range
             const clampedValue = Math.max(0, Math.min(100, Math.round(value)));
 
-            console.log(`[DdcutilDisplay] Setting brightness for ${this.displayInfo.name} to ${clampedValue}%`);
+            debugLog(`[DdcutilDisplay] Setting brightness for ${this.displayInfo.name} to ${clampedValue}%`);
 
             // Use Gio.Subprocess to properly await command completion
             const proc = new Gio.Subprocess({
@@ -321,15 +322,15 @@ export class DdcutilDisplay extends DisplayController {
             if (!proc.get_successful()) {
                 const status = proc.get_exit_status();
                 const detail = stderr && stderr.trim() ? stderr.trim() : '(no stderr)';
-                console.warn(`[DdcutilDisplay] ddcutil setvcp exited ${status} for ${this.displayInfo.name}: ${detail}`);
+                debugWarn(`[DdcutilDisplay] ddcutil setvcp exited ${status} for ${this.displayInfo.name}: ${detail}`);
                 return false;
             }
 
             if (stderr && stderr.trim()) {
-                console.warn(`[DdcutilDisplay] stderr: ${stderr.trim()}`);
+                debugWarn(`[DdcutilDisplay] stderr: ${stderr.trim()}`);
             }
 
-            console.log(`[DdcutilDisplay] Brightness set to ${clampedValue}% for ${this.displayInfo.name}`);
+            debugLog(`[DdcutilDisplay] Brightness set to ${clampedValue}% for ${this.displayInfo.name}`);
             return true;
         } catch (e) {
             console.error(`DdcutilDisplay: Failed to set brightness for ${this.displayInfo.name}: ${e}`);
@@ -347,7 +348,7 @@ export class DdcutilDisplay extends DisplayController {
             const brightness = await this.getBrightness();
             return brightness !== null;
         } catch (e) {
-            console.error(`DdcutilDisplay: Failed to check availability for ${this.displayInfo.name}: ${e}`);
+            debugWarn(`DdcutilDisplay: Failed to check availability for ${this.displayInfo.name}: ${e}`);
             return false;
         }
     }
@@ -429,7 +430,7 @@ export class MutterBacklightDisplay extends DisplayController {
             }
             return null;
         } catch (e) {
-            console.error(`MutterBacklightDisplay: Error finding monitor: ${e}`);
+            debugWarn(`MutterBacklightDisplay: Error finding monitor: ${e}`);
             return null;
         }
     }
@@ -442,7 +443,7 @@ export class MutterBacklightDisplay extends DisplayController {
         try {
             const result = this._findMonitorBacklight();
             if (!result) {
-                console.warn(`MutterBacklightDisplay: Monitor "${this.displayName}" not found or has no backlight`);
+                debugWarn(`MutterBacklightDisplay: Monitor "${this.displayName}" not found or has no backlight`);
                 return null;
             }
 
@@ -450,7 +451,7 @@ export class MutterBacklightDisplay extends DisplayController {
             const { brightness, brightnessMin: min, brightnessMax: max } = backlight;
 
             if (max === min) {
-                console.warn(`MutterBacklightDisplay: Invalid brightness range for ${this.displayName}`);
+                debugWarn(`MutterBacklightDisplay: Invalid brightness range for ${this.displayName}`);
                 return null;
             }
 
@@ -458,7 +459,7 @@ export class MutterBacklightDisplay extends DisplayController {
             const percentage = Math.round(((brightness - min) / (max - min)) * 100);
             return Math.max(0, Math.min(100, percentage));
         } catch (e) {
-            console.error(`MutterBacklightDisplay: Failed to get brightness for ${this.displayName}: ${e}`);
+            debugWarn(`MutterBacklightDisplay: Failed to get brightness for ${this.displayName}: ${e}`);
             return null;
         }
     }
@@ -472,7 +473,7 @@ export class MutterBacklightDisplay extends DisplayController {
         try {
             const result = this._findMonitorBacklight();
             if (!result) {
-                console.warn(`MutterBacklightDisplay: Monitor "${this.displayName}" not found or has no backlight`);
+                debugWarn(`MutterBacklightDisplay: Monitor "${this.displayName}" not found or has no backlight`);
                 return false;
             }
 
@@ -485,7 +486,7 @@ export class MutterBacklightDisplay extends DisplayController {
 
             backlight.brightness = Math.round(brightnessValue);
 
-            console.log(`MutterBacklightDisplay: Set ${this.displayName} brightness to ${clampedValue}%`);
+            debugLog(`MutterBacklightDisplay: Set ${this.displayName} brightness to ${clampedValue}%`);
             return true;
         } catch (e) {
             console.error(`MutterBacklightDisplay: Failed to set brightness for ${this.displayName}: ${e}`);
@@ -538,7 +539,7 @@ export class MutterBacklightDisplay extends DisplayController {
                 }
             }
         } catch (e) {
-            console.error(`MutterBacklightDisplay: Error getting available monitors: ${e}`);
+            debugWarn(`MutterBacklightDisplay: Error getting available monitors: ${e}`);
         }
 
         return monitors;
@@ -660,7 +661,7 @@ export async function probeDisplayController(monitor, settings) {
         displayName: monitor.name,
     }, settings);
     if (await mutter.isAvailable()) {
-        console.log(`probeDisplayController: ${monitor.name} → Mutter backlight API`);
+        debugLog(`probeDisplayController: ${monitor.name} → Mutter backlight API`);
         return mutter;
     }
 
@@ -669,13 +670,13 @@ export async function probeDisplayController(monitor, settings) {
     if (isBuiltin) {
         const dbus = new SettingsDaemonPowerDisplay(settings);
         if (await dbus.isAvailable()) {
-            console.log(`probeDisplayController: ${monitor.name} → SettingsDaemon.Power d-bus`);
+            debugLog(`probeDisplayController: ${monitor.name} → SettingsDaemon.Power d-bus`);
             return dbus;
         }
-        console.log(`probeDisplayController: ${monitor.name} → brightnessctl (last resort)`);
+        debugLog(`probeDisplayController: ${monitor.name} → brightnessctl (last resort)`);
         return new BrightnessCtlDisplay(settings);
     }
 
-    console.log(`probeDisplayController: ${monitor.name} → ddcutil`);
+    debugLog(`probeDisplayController: ${monitor.name} → ddcutil`);
     return new DdcutilDisplay(monitor, settings);
 }

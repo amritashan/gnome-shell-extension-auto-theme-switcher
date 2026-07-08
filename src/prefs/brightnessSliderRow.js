@@ -1,6 +1,7 @@
 import Gtk from 'gi://Gtk';
 import Adw from 'gi://Adw';
 import GLib from 'gi://GLib';
+import { debugLog, debugWarn } from '../logger.js';
 
 /**
  * Reusable brightness slider component with real-time preview functionality.
@@ -179,13 +180,13 @@ export class BrightnessSliderRow {
 
         // When user presses down on the slider
         this.gesture.connect('pressed', () => {
-            console.log(`[BrightnessSliderRow] Pressed signal received`);
+            debugLog(`[BrightnessSliderRow] Pressed signal received`);
             this._onPreviewStart();
         });
 
         // When gesture ends (includes button release)
         this.gesture.connect('end', () => {
-            console.log(`[BrightnessSliderRow] End signal received`);
+            debugLog(`[BrightnessSliderRow] End signal received`);
             this._onPreviewEnd();
         });
 
@@ -198,7 +199,7 @@ export class BrightnessSliderRow {
         const focusController = new Gtk.EventControllerFocus();
         focusController.connect('leave', () => {
             if (this.isGrabbed) {
-                console.log(`[BrightnessSliderRow] Focus lost while dragging - cleaning up`);
+                debugLog(`[BrightnessSliderRow] Focus lost while dragging - cleaning up`);
                 this._onPreviewEnd();
             }
         });
@@ -211,11 +212,11 @@ export class BrightnessSliderRow {
      * @private
      */
     _onPreviewStart() {
-        console.log(`[BrightnessSliderRow] Preview started for ${this.title} on ${this.monitorName}`);
+        debugLog(`[BrightnessSliderRow] Preview started for ${this.title} on ${this.monitorName}`);
 
         // Don't start a new preview if one is already in progress
         if (this.isGrabbed) {
-            console.log(`[BrightnessSliderRow] Preview already in progress, ignoring`);
+            debugLog(`[BrightnessSliderRow] Preview already in progress, ignoring`);
             return;
         }
 
@@ -234,31 +235,31 @@ export class BrightnessSliderRow {
             // Trough click: use the value from BEFORE the click-triggered change
             fallbackValue = this._prevNonPreviewValue;
             this._recentNonPreviewChange = false;
-            console.log(`[BrightnessSliderRow] Trough click detected, pre-click value: ${fallbackValue}%`);
+            debugLog(`[BrightnessSliderRow] Trough click detected, pre-click value: ${fallbackValue}%`);
         } else {
             // Thumb drag: use the current tracked value
             fallbackValue = this._currNonPreviewValue;
-            console.log(`[BrightnessSliderRow] Thumb drag detected, current value: ${fallbackValue}%`);
+            debugLog(`[BrightnessSliderRow] Thumb drag detected, current value: ${fallbackValue}%`);
         }
 
         // Query the actual current SYSTEM brightness (not the slider's configured value).
         // _processNextBrightness gates on this promise so getBrightness ALWAYS completes
         // before our first setBrightness hits the hardware — no race on the i2c/VCP bus,
         // no risk of reading back our own preview write as the "original".
-        console.log(`[BrightnessSliderRow] Querying current system brightness...`);
+        debugLog(`[BrightnessSliderRow] Querying current system brightness...`);
         this.brightnessQueryPromise = this.displayController.getBrightness().then(currentBrightness => {
             if (currentBrightness !== null) {
                 this.originalBrightness = currentBrightness;
-                console.log(`[BrightnessSliderRow] Saved original system brightness: ${this.originalBrightness}%`);
+                debugLog(`[BrightnessSliderRow] Saved original system brightness: ${this.originalBrightness}%`);
             } else {
                 this.originalBrightness = fallbackValue;
-                console.log(`[BrightnessSliderRow] getBrightness returned null, using tracked pre-interaction value: ${this.originalBrightness}%`);
+                debugLog(`[BrightnessSliderRow] getBrightness returned null, using tracked pre-interaction value: ${this.originalBrightness}%`);
             }
             return this.originalBrightness;
         }).catch(e => {
             console.error(`[BrightnessSliderRow] Failed to get current brightness: ${e}`);
             this.originalBrightness = fallbackValue;
-            console.log(`[BrightnessSliderRow] Fallback to tracked value: ${this.originalBrightness}%`);
+            debugLog(`[BrightnessSliderRow] Fallback to tracked value: ${this.originalBrightness}%`);
             return this.originalBrightness;
         });
 
@@ -341,7 +342,7 @@ export class BrightnessSliderRow {
      * @private
      */
     _applyPreviewBrightness(value) {
-        console.log(`[BrightnessSliderRow] Requesting preview brightness: ${value}% on ${this.monitorName}`);
+        debugLog(`[BrightnessSliderRow] Requesting preview brightness: ${value}% on ${this.monitorName}`);
         this.lastPreviewUpdate = Date.now();
 
         // Always store the latest desired value
@@ -350,7 +351,7 @@ export class BrightnessSliderRow {
         // If a setBrightness is already in flight, just update latestDesiredBrightness
         // The in-flight operation will pick up the new value when it completes
         if (this.brightnessInFlight) {
-            console.log(`[BrightnessSliderRow] setBrightness in flight, queued ${value}% as latest`);
+            debugLog(`[BrightnessSliderRow] setBrightness in flight, queued ${value}% as latest`);
             return;
         }
 
@@ -371,7 +372,7 @@ export class BrightnessSliderRow {
 
         // Check if still in preview mode
         if (!this.isGrabbed) {
-            console.log(`[BrightnessSliderRow] Skipping preview apply - no longer grabbed`);
+            debugLog(`[BrightnessSliderRow] Skipping preview apply - no longer grabbed`);
             this.latestDesiredBrightness = null;
             return;
         }
@@ -404,7 +405,7 @@ export class BrightnessSliderRow {
         this.latestDesiredBrightness = null;
         this.brightnessInFlight = true;
 
-        console.log(`[BrightnessSliderRow] Applying preview brightness: ${valueToApply}% on ${this.monitorName}`);
+        debugLog(`[BrightnessSliderRow] Applying preview brightness: ${valueToApply}% on ${this.monitorName}`);
 
         try {
             // Store promise so _restoreOriginalBrightness can wait for it
@@ -418,7 +419,7 @@ export class BrightnessSliderRow {
 
         // Check if a newer value came in while we were processing
         if (this.latestDesiredBrightness !== null && this.isGrabbed) {
-            console.log(`[BrightnessSliderRow] Newer value ${this.latestDesiredBrightness}% queued, processing...`);
+            debugLog(`[BrightnessSliderRow] Newer value ${this.latestDesiredBrightness}% queued, processing...`);
             this._processNextBrightness();
         }
     }
@@ -429,11 +430,11 @@ export class BrightnessSliderRow {
      * @private
      */
     _onPreviewEnd() {
-        console.log(`[BrightnessSliderRow] Preview ended for ${this.title} on ${this.monitorName}, isGrabbed=${this.isGrabbed}`);
+        debugLog(`[BrightnessSliderRow] Preview ended for ${this.title} on ${this.monitorName}, isGrabbed=${this.isGrabbed}`);
 
         // If not grabbed, nothing to do
         if (!this.isGrabbed) {
-            console.log(`[BrightnessSliderRow] Not in preview mode, ignoring end signal`);
+            debugLog(`[BrightnessSliderRow] Not in preview mode, ignoring end signal`);
             return;
         }
 
@@ -453,7 +454,7 @@ export class BrightnessSliderRow {
 
         // Save the final value to settings (only if settingsKey is provided)
         const finalValue = Math.round(this.adjustment.get_value());
-        console.log(`[BrightnessSliderRow] Final value: ${finalValue}%`);
+        debugLog(`[BrightnessSliderRow] Final value: ${finalValue}%`);
         if (this.settingsKey) {
             this.displayController.settings.set_int(this.settingsKey, finalValue);
         }
@@ -461,7 +462,7 @@ export class BrightnessSliderRow {
 
         // Dismiss the preview toast immediately
         if (this.previewToast) {
-            console.log(`[BrightnessSliderRow] Dismissing preview toast`);
+            debugLog(`[BrightnessSliderRow] Dismissing preview toast`);
             this.previewToast.dismiss();
             this.previewToast = null;
         }
@@ -482,7 +483,7 @@ export class BrightnessSliderRow {
 
         // If the brightness query is still pending, wait for it
         if (this.originalBrightness === null && this.brightnessQueryPromise !== null) {
-            console.log(`[BrightnessSliderRow] Waiting for brightness query to complete...`);
+            debugLog(`[BrightnessSliderRow] Waiting for brightness query to complete...`);
             try {
                 await this.brightnessQueryPromise;
             } catch (e) {
@@ -497,7 +498,7 @@ export class BrightnessSliderRow {
         // This is critical for slow controllers like ddcutil - if we don't wait,
         // the preview setBrightness might complete AFTER our restore setBrightness
         if (this.lastPreviewPromise !== null || this.brightnessInFlight) {
-            console.log(`[BrightnessSliderRow] Waiting for in-flight preview setBrightness to complete...`);
+            debugLog(`[BrightnessSliderRow] Waiting for in-flight preview setBrightness to complete...`);
             try {
                 if (this.lastPreviewPromise) {
                     await this.lastPreviewPromise;
@@ -510,7 +511,7 @@ export class BrightnessSliderRow {
         }
 
         if (this.originalBrightness !== null) {
-            console.log(`[BrightnessSliderRow] Restoring original brightness: ${this.originalBrightness}% on ${this.monitorName}`);
+            debugLog(`[BrightnessSliderRow] Restoring original brightness: ${this.originalBrightness}% on ${this.monitorName}`);
 
             // Store original brightness before clearing it
             const brightnessToRestore = this.originalBrightness;
@@ -519,7 +520,7 @@ export class BrightnessSliderRow {
             // Restore brightness
             try {
                 await this.displayController.setBrightness(brightnessToRestore);
-                console.log(`[BrightnessSliderRow] Brightness restored successfully on ${this.monitorName}`);
+                debugLog(`[BrightnessSliderRow] Brightness restored successfully on ${this.monitorName}`);
 
                 // Show a toast to confirm restoration with monitor name
                 const restoredToast = new Adw.Toast({
@@ -537,7 +538,7 @@ export class BrightnessSliderRow {
                 this.window.add_toast(errorToast);
             }
         } else {
-            console.log(`[BrightnessSliderRow] No original brightness to restore`);
+            debugLog(`[BrightnessSliderRow] No original brightness to restore`);
         }
     }
 

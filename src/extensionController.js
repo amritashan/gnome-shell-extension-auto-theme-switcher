@@ -10,11 +10,13 @@ import { BrightnessController } from './brightnessController.js';
 import { ThemeController } from './themeController.js';
 import { SolarCalculator } from './solarCalculator.js';
 import { TimeCalculator, secondsUntilEvent } from './timeCalculator.js';
+import { debugLog, debugWarn, setDebugLogging } from './logger.js';
 
 export class ExtensionController {
     constructor(extension) {
         this._extension = extension;
         this._settings = extension.getSettings();
+        setDebugLogging(this._settings.get_boolean('debug-logging'));
         this._scheduleTimeoutId = null;
         this._resumeTimeoutId = null;
         this._debugInfo = null;
@@ -67,7 +69,7 @@ export class ExtensionController {
             // the user has dialed in via the monitor's OSD (or anywhere else) since
             // their last forceThemeSwitch click stays. The auto schedule does NOT
             // start.
-            console.log(`ExtensionController: Restoring manual ${this._manualModeIsDark ? 'dark' : 'light'} mode (theme only, brightness preserved)`);
+            debugLog(`ExtensionController: Restoring manual ${this._manualModeIsDark ? 'dark' : 'light'} mode (theme only, brightness preserved)`);
             this._themeController.switchTheme(this._manualModeIsDark, false, true);
             return;
         }
@@ -93,7 +95,7 @@ export class ExtensionController {
 
             // Clear the pending notification
             this._settings.set_string('migration-notification-pending', '');
-            console.log('ExtensionController: Showed v0-to-v1 migration notification');
+            debugLog('ExtensionController: Showed v0-to-v1 migration notification');
         }
     }
 
@@ -118,6 +120,10 @@ export class ExtensionController {
 
         this._controlBrightnessChangedId = this._settings.connect('changed::control-brightness', () => {
             this._brightnessController.scheduleBrightnessUpdates();
+        });
+
+        this._debugLoggingChangedId = this._settings.connect('changed::debug-logging', () => {
+            setDebugLogging(this._settings.get_boolean('debug-logging'));
         });
 
         // Note: We don't watch 'changed::monitors' to avoid race conditions with preview/restore
@@ -205,12 +211,12 @@ export class ExtensionController {
     _reapplyBrightnessForCurrentMode(reason, { reapplyOnManual = false } = {}) {
         if (this._manualModeActive) {
             if (reapplyOnManual) {
-                console.log(`ExtensionController: ${reason} — re-applying manual ${this._manualModeIsDark ? 'dark' : 'light'} brightness`);
+                debugLog(`ExtensionController: ${reason} — re-applying manual ${this._manualModeIsDark ? 'dark' : 'light'} brightness`);
                 this._brightnessController.applyManualBrightness(this._manualModeIsDark).catch(e => {
-                    console.error(`ExtensionController: Failed to re-apply manual brightness after ${reason}:`, e);
+                    debugWarn(`ExtensionController: Failed to re-apply manual brightness after ${reason}:`, e);
                 });
             } else {
-                console.log(`ExtensionController: ${reason} — leaving brightness alone (manual mode, set-once-leave-alone)`);
+                debugLog(`ExtensionController: ${reason} — leaving brightness alone (manual mode, set-once-leave-alone)`);
             }
             return;
         }
@@ -219,9 +225,9 @@ export class ExtensionController {
         // Inside a transition, the brightness loop owns updates — fighting it would
         // resurrect the "brightness snaps to lightBrightness every few minutes" bug.
         const allowStatic = !this._brightnessController.isInTransitionWindow();
-        console.log(`ExtensionController: ${reason} — auto re-applying brightness (allowStatic=${allowStatic})`);
+        debugLog(`ExtensionController: ${reason} — auto re-applying brightness (allowStatic=${allowStatic})`);
         this._brightnessController.updateBrightness(allowStatic).catch(e => {
-            console.error(`ExtensionController: Failed to update brightness after ${reason}:`, e);
+            debugWarn(`ExtensionController: Failed to update brightness after ${reason}:`, e);
         });
     }
 
@@ -353,6 +359,7 @@ export class ExtensionController {
             '_manual_longitudeChangedId',
             '_controlBrightnessChangedId',
             '_trueLightModeChangedId',
+            '_debugLoggingChangedId',
         ];
 
         for (const signalId of settingsSignals) {
@@ -390,7 +397,7 @@ export class ExtensionController {
         // of the per-caller guards (settings listeners, suspend handler, schedule
         // timer callback) — if any future caller is added, the flag still wins.
         if (this._manualModeActive) {
-            console.log('ExtensionController: skipping _scheduleNextChangeEvent — manual mode is active');
+            debugLog('ExtensionController: skipping _scheduleNextChangeEvent — manual mode is active');
             return;
         }
 
@@ -435,7 +442,7 @@ export class ExtensionController {
             darkModeTrigger = 'custom';
 
             if (!hasCoordinates) {
-                console.log('ThemeSwitcher: No coordinates set, using custom times');
+                debugLog('ThemeSwitcher: No coordinates set, using custom times');
             }
         }
 
@@ -462,7 +469,7 @@ export class ExtensionController {
             // The scheduled brightness loop handles gradual transitions
             if (!this._brightnessController.isInTransitionWindow()) {
                 this._brightnessController.updateBrightness(true).catch(e => {
-                    console.error('ExtensionController: Failed to update brightness on initial schedule:', e);
+                    debugWarn('ExtensionController: Failed to update brightness on initial schedule:', e);
                 });
             }
             switchToDark = false;
@@ -478,7 +485,7 @@ export class ExtensionController {
             // The scheduled brightness loop handles gradual transitions
             if (!this._brightnessController.isInTransitionWindow()) {
                 this._brightnessController.updateBrightness(true).catch(e => {
-                    console.error('ExtensionController: Failed to update brightness on initial schedule:', e);
+                    debugWarn('ExtensionController: Failed to update brightness on initial schedule:', e);
                 });
             }
             switchToDark = true;
@@ -646,7 +653,7 @@ export class ExtensionController {
                     brightnessInfo.nextTransition = nextTransition;
                 }
             } catch (e) {
-                console.warn('Failed to load monitor brightness settings for debug info:', e);
+                debugWarn('Failed to load monitor brightness settings for debug info:', e);
             }
         }
 

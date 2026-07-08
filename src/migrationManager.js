@@ -1,6 +1,7 @@
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import { BrightnessCtlDisplay } from './displayController.js';
+import { debugLog, debugWarn } from './logger.js';
 
 /**
  * Manages all data migrations between different extension versions.
@@ -32,24 +33,24 @@ export class MigrationManager {
     async run() {
         try {
             const currentVersion = this.settings.get_int('data-version');
-            console.log(`MigrationManager: Current data version: ${currentVersion}`);
+            debugLog(`MigrationManager: Current data version: ${currentVersion}`);
 
             // Run migrations in sequence based on version
             if (currentVersion < 1) {
-                console.log('MigrationManager: Running migration v0 → v1 (external monitors + local solar)');
+                debugLog('MigrationManager: Running migration v0 → v1 (external monitors + local solar)');
                 await this._migrateV0ToV1();
             }
 
             // Future migrations can be added here:
             // if (currentVersion < 2) {
-            //     console.log('MigrationManager: Running migration v1 → v2');
+            //     debugLog('MigrationManager: Running migration v1 → v2');
             //     await this._migrateV1ToV2();
             // }
 
-            console.log('MigrationManager: All migrations complete');
+            debugLog('MigrationManager: All migrations complete');
         } catch (e) {
             console.error(`MigrationManager: Migration system failed: ${e}`);
-            console.error(`MigrationManager: Stack: ${e.stack}`);
+            debugWarn(`MigrationManager: Stack: ${e.stack}`);
             throw e; // Re-throw to let caller handle
         }
     }
@@ -76,13 +77,13 @@ export class MigrationManager {
             const hasBuiltin = monitors.some(m => m.id === 'builtin');
 
             if (hasBuiltin) {
-                console.log('MigrationManager: Migration v0→v1 already complete (builtin exists)');
+                debugLog('MigrationManager: Migration v0→v1 already complete (builtin exists)');
                 // Ensure version is set correctly (in case it wasn't set before)
                 this.settings.set_int('data-version', 1);
                 return;
             }
 
-            console.log('MigrationManager: Starting migration v0 → v1');
+            debugLog('MigrationManager: Starting migration v0 → v1');
 
             // Step 1: Try to read old brightness values from dconf directly
             // Old keys were removed from schema, so GSettings won't work
@@ -99,7 +100,7 @@ export class MigrationManager {
 
             // If old values don't exist, read current brightness (new user)
             if (lightBrightness === null || darkBrightness === null) {
-                console.log('MigrationManager: Old brightness values not found, reading current brightness for new user');
+                debugLog('MigrationManager: Old brightness values not found, reading current brightness for new user');
                 const currentBrightness = await this._readCurrentBrightness();
 
                 // Use current for both to avoid jarring changes
@@ -125,7 +126,7 @@ export class MigrationManager {
             monitors.unshift(builtin);
             this._saveMonitors(monitors);
 
-            console.log(`MigrationManager: Builtin monitor created - light=${lightBrightness ?? 'null'}%, dark=${darkBrightness ?? 'null'}%`);
+            debugLog(`MigrationManager: Builtin monitor created - light=${lightBrightness ?? 'null'}%, dark=${darkBrightness ?? 'null'}%`);
 
             // Step 6: Clean up old brightness keys
             if (oldValues.light !== null || oldValues.dark !== null) {
@@ -143,13 +144,13 @@ export class MigrationManager {
 
             // Step 10: Set pending notification flag for ExtensionController to show
             this.settings.set_string('migration-notification-pending', 'v0-to-v1');
-            console.log('MigrationManager: Set migration notification pending');
+            debugLog('MigrationManager: Set migration notification pending');
 
-            console.log(`MigrationManager: Migration v0→v1 complete - ${monitors.length} total monitors`);
+            debugLog(`MigrationManager: Migration v0→v1 complete - ${monitors.length} total monitors`);
 
         } catch (e) {
             console.error(`MigrationManager: Migration v0→v1 failed: ${e}`);
-            console.error(`MigrationManager: Stack: ${e.stack}`);
+            debugWarn(`MigrationManager: Stack: ${e.stack}`);
             // Don't update version if migration failed - will retry next time
             throw e;
         }
@@ -187,7 +188,7 @@ export class MigrationManager {
                 const lightValue = stdoutLight.trim();
                 if (lightValue && lightValue !== '') {
                     oldLightBrightness = parseInt(lightValue);
-                    console.log(`MigrationManager: Found old light-brightness: ${oldLightBrightness}%`);
+                    debugLog(`MigrationManager: Found old light-brightness: ${oldLightBrightness}%`);
                 }
             }
 
@@ -212,11 +213,11 @@ export class MigrationManager {
                 const darkValue = stdoutDark.trim();
                 if (darkValue && darkValue !== '') {
                     oldDarkBrightness = parseInt(darkValue);
-                    console.log(`MigrationManager: Found old dark-brightness: ${oldDarkBrightness}%`);
+                    debugLog(`MigrationManager: Found old dark-brightness: ${oldDarkBrightness}%`);
                 }
             }
         } catch (e) {
-            console.warn(`MigrationManager: Could not read old brightness values from dconf: ${e}`);
+            debugWarn(`MigrationManager: Could not read old brightness values from dconf: ${e}`);
         }
 
         return {
@@ -238,12 +239,12 @@ export class MigrationManager {
             if (isAvailable) {
                 const currentBrightness = await controller.getBrightness();
                 if (currentBrightness !== null) {
-                    console.log(`MigrationManager: Read current brightness: ${currentBrightness}%`);
+                    debugLog(`MigrationManager: Read current brightness: ${currentBrightness}%`);
                     return currentBrightness;
                 }
             }
         } catch (e) {
-            console.warn(`MigrationManager: Could not read current brightness: ${e}`);
+            debugWarn(`MigrationManager: Could not read current brightness: ${e}`);
         }
 
         return null;
@@ -257,9 +258,9 @@ export class MigrationManager {
         try {
             GLib.spawn_command_line_async(`dconf reset ${this.schemaPath}light-brightness`);
             GLib.spawn_command_line_async(`dconf reset ${this.schemaPath}dark-brightness`);
-            console.log('MigrationManager: Cleaned up old brightness keys');
+            debugLog('MigrationManager: Cleaned up old brightness keys');
         } catch (e) {
-            console.warn(`MigrationManager: Could not clean up old brightness keys: ${e}`);
+            debugWarn(`MigrationManager: Could not clean up old brightness keys: ${e}`);
         }
     }
 
@@ -280,10 +281,10 @@ export class MigrationManager {
         for (const key of keysToRemove) {
             try {
                 GLib.spawn_command_line_async(`dconf reset ${this.schemaPath}${key}`);
-                console.log(`MigrationManager: Removed old API key: ${key}`);
+                debugLog(`MigrationManager: Removed old API key: ${key}`);
             } catch (e) {
                 // Key might not exist, which is fine
-                console.log(`MigrationManager: API key ${key} not found or already removed`);
+                debugLog(`MigrationManager: API key ${key} not found or already removed`);
             }
         }
     }
@@ -301,10 +302,10 @@ export class MigrationManager {
             if (lat && lng && !locationName) {
                 // Coordinates exist but no name - set a placeholder
                 this.settings.set_string('location-name', 'Custom Location');
-                console.log('MigrationManager: Set default location name for existing coordinates');
+                debugLog('MigrationManager: Set default location name for existing coordinates');
             }
         } catch (e) {
-            console.warn(`MigrationManager: Could not initialize location-name: ${e}`);
+            debugWarn(`MigrationManager: Could not initialize location-name: ${e}`);
         }
     }
 
@@ -319,7 +320,7 @@ export class MigrationManager {
             const monitors = JSON.parse(json);
 
             if (!Array.isArray(monitors)) {
-                console.warn('MigrationManager: Cached monitors is not an array');
+                debugWarn('MigrationManager: Cached monitors is not an array');
                 return [];
             }
 
@@ -347,7 +348,7 @@ export class MigrationManager {
             this.settings.set_string('monitors', json);
             this.settings.set_int64('monitors-last-detection', Date.now());
 
-            console.log(`MigrationManager: Saved ${monitors.length} monitors to settings`);
+            debugLog(`MigrationManager: Saved ${monitors.length} monitors to settings`);
         } catch (e) {
             console.error(`MigrationManager: Failed to save monitors: ${e}`);
             throw e;

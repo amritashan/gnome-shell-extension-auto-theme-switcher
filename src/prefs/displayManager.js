@@ -2,6 +2,7 @@ import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import { DdcutilDisplay } from '../displayController.js';
 import { MigrationManager } from '../migrationManager.js';
+import { debugLog, debugWarn } from '../logger.js';
 
 /**
  * Manages detection and tracking of all monitors (built-in and external).
@@ -42,11 +43,11 @@ export class DisplayManager {
             // Check if ddcutil is installed first
             const isDdcutilInstalled = await DdcutilDisplay.checkDdcutilInstalled();
             if (!isDdcutilInstalled) {
-                console.log('DisplayManager: ddcutil is not installed');
+                debugLog('DisplayManager: ddcutil is not installed');
                 return [];
             }
 
-            console.log('DisplayManager: Starting monitor detection...');
+            debugLog('DisplayManager: Starting monitor detection...');
             const startTime = Date.now();
 
             // Use async subprocess to avoid freezing the shell (can take 5-30 seconds)
@@ -73,20 +74,20 @@ export class DisplayManager {
             const monitors = this._parseDetectOutput(output);
 
             const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-            console.log(`DisplayManager: Detected ${monitors.length} monitors in ${elapsed}s`);
+            debugLog(`DisplayManager: Detected ${monitors.length} monitors in ${elapsed}s`);
 
             // Log any warnings/errors from stderr
             if (errorOutput && errorOutput.trim() !== '') {
                 // Only treat as fatal error if no monitors detected AND there's a permission error
                 if (monitors.length === 0 && (errorOutput.includes('Permission denied') || errorOutput.includes('EACCES'))) {
                     console.error('DisplayManager: Permission denied and no monitors detected');
-                    console.error('DisplayManager: Run: sudo usermod -a -G i2c $USER');
-                    console.error('DisplayManager: Then log out and log back in');
+                    debugWarn('DisplayManager: Run: sudo usermod -a -G i2c $USER');
+                    debugWarn('DisplayManager: Then log out and log back in');
                     throw new Error('Permission denied: You need to be in the i2c group. See installation instructions.');
                 }
 
                 // Otherwise just log warnings (permission errors on unused I2C devices are common)
-                console.warn(`DisplayManager: ddcutil stderr output: ${errorOutput}`);
+                debugWarn(`DisplayManager: ddcutil stderr output: ${errorOutput}`);
             }
 
             return monitors;
@@ -118,7 +119,7 @@ export class DisplayManager {
                 }
             } catch (e) {
                 console.error(`DisplayManager: Error parsing display block: ${e}`);
-                console.error(`Block content: ${block}`);
+                debugWarn(`Block content: ${block}`);
             }
         }
 
@@ -205,7 +206,7 @@ export class DisplayManager {
 
         // Validate we have minimum required information
         if (!monitor.i2cBus || !monitor.manufacturer || !monitor.model) {
-            console.warn('DisplayManager: Incomplete monitor information, skipping:', monitor);
+            debugWarn('DisplayManager: Incomplete monitor information, skipping:', monitor);
             return null;
         }
 
@@ -233,7 +234,7 @@ export class DisplayManager {
         }
 
         // Priority 3: I2C bus number (warning: can change if ports change)
-        console.warn(
+        debugWarn(
             `DisplayManager: Monitor ${manufacturer} ${model} has no serial number. ` +
             `Using I2C bus for identification. Settings may not persist if monitor is ` +
             `plugged into a different port.`
@@ -281,12 +282,12 @@ export class DisplayManager {
             const monitors = JSON.parse(json);
 
             if (!Array.isArray(monitors)) {
-                console.warn('DisplayManager: Cached monitors is not an array');
+                debugWarn('DisplayManager: Cached monitors is not an array');
                 return [];
             }
 
             monitors.forEach(m => {
-                console.log(`DisplayManager: Loaded monitor: id=${m.id}, name=${m.name}, enabled=${m.enabled}, initialized=${m.initialized}, lightBrightness=${m.lightBrightness}, darkBrightness=${m.darkBrightness}`);
+                debugLog(`DisplayManager: Loaded monitor: id=${m.id}, name=${m.name}, enabled=${m.enabled}, initialized=${m.initialized}, lightBrightness=${m.lightBrightness}, darkBrightness=${m.darkBrightness}`);
             });
             return monitors;
         } catch (e) {
@@ -311,7 +312,7 @@ export class DisplayManager {
             this.settings.set_string('monitors', json);
             this.settings.set_int64('monitors-last-detection', Date.now());
 
-            console.log(`DisplayManager: Saved ${monitors.length} monitors to settings`);
+            debugLog(`DisplayManager: Saved ${monitors.length} monitors to settings`);
         } catch (e) {
             console.error(`DisplayManager: Failed to save monitors: ${e}`);
         }
@@ -337,7 +338,7 @@ export class DisplayManager {
 
             if (cached) {
                 // Known monitor - preserve user settings
-                console.log(`DisplayManager: Merging detected monitor ${detected.id} with cached: enabled=${cached.enabled}, initialized=${cached.initialized}, lightBrightness=${cached.lightBrightness}, darkBrightness=${cached.darkBrightness}`);
+                debugLog(`DisplayManager: Merging detected monitor ${detected.id} with cached: enabled=${cached.enabled}, initialized=${cached.initialized}, lightBrightness=${cached.lightBrightness}, darkBrightness=${cached.darkBrightness}`);
                 merged.push({
                     ...detected,
                     enabled: cached.enabled,
@@ -349,7 +350,7 @@ export class DisplayManager {
                 });
             } else {
                 // New monitor - add with defaults
-                console.log(`DisplayManager: New monitor detected ${detected.id}, using defaults`);
+                debugLog(`DisplayManager: New monitor detected ${detected.id}, using defaults`);
                 merged.push({
                     ...detected,
                     enabled: false,  // User must explicitly enable
@@ -362,7 +363,7 @@ export class DisplayManager {
             }
         }
 
-        console.log(`DisplayManager: Merged ${merged.length} monitors (${detectedMonitors.length} detected, ${cachedMonitors.length} cached)`);
+        debugLog(`DisplayManager: Merged ${merged.length} monitors (${detectedMonitors.length} detected, ${cachedMonitors.length} cached)`);
         return merged;
     }
 
@@ -377,7 +378,7 @@ export class DisplayManager {
         const missing = cachedMonitors.filter(m => !detectedIds.has(m.id));
 
         if (missing.length > 0) {
-            console.log(`DisplayManager: ${missing.length} cached monitors not detected (possibly unplugged):`,
+            debugLog(`DisplayManager: ${missing.length} cached monitors not detected (possibly unplugged):`,
                        missing.map(m => m.name));
         }
 
