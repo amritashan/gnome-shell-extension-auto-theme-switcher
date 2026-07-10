@@ -9,7 +9,7 @@ import {
 import { BrightnessController } from './brightnessController.js';
 import { ThemeController } from './themeController.js';
 import { SolarCalculator } from './solarCalculator.js';
-import { TimeCalculator, secondsUntilEvent } from './timeCalculator.js';
+import { TimeCalculator, secondsUntilEvent, computeNextEvent } from './timeCalculator.js';
 import { debugLog, debugWarn, setDebugLogging } from './logger.js';
 
 export class ExtensionController {
@@ -461,46 +461,29 @@ export class ExtensionController {
         // Store debug info
         this._storeDebugInfo(now, lightTime, darkTime, lightModeTrigger, darkModeTrigger, solarTimes);
 
-        // Determine current mode and next event
-        let nextEventTime, switchToDark;
-        if (now >= darkTime || now < lightTime) {
-            this._themeController.switchTheme(true, true, this._manualModeActive);
-            // Only apply static brightness if NOT in a transition window
-            // The scheduled brightness loop handles gradual transitions
-            if (!this._brightnessController.isInTransitionWindow()) {
-                this._brightnessController.updateBrightness(true).catch(e => {
-                    debugWarn('ExtensionController: Failed to update brightness on initial schedule:', e);
-                });
-            }
-            switchToDark = false;
-            if (now < lightTime) {
-                nextEventTime = lightTime;
-            } else {
-                nextEventTime = new Date(lightTime.getTime() + MS_PER_DAY);
-            }
-            this._debugInfo.currentMode = 'night';
-        } else {
-            this._themeController.switchTheme(false, true, this._manualModeActive);
-            // Only apply static brightness if NOT in a transition window
-            // The scheduled brightness loop handles gradual transitions
-            if (!this._brightnessController.isInTransitionWindow()) {
-                this._brightnessController.updateBrightness(true).catch(e => {
-                    debugWarn('ExtensionController: Failed to update brightness on initial schedule:', e);
-                });
-            }
-            switchToDark = true;
-            nextEventTime = darkTime;
-            this._debugInfo.currentMode = 'day';
+        // Determine current mode and next event. computeNextEvent is the single
+        // source of truth for the boundary: its delay is clamped to >= 1s, so a
+        // timer that fires moments before the switch time re-arms for the next
+        // second instead of spinning at 0s (issue #10 flip-back storm).
+        const { isDark, nextEventTimestamp, secondsToNextEvent } =
+            computeNextEvent(now.getTime(), lightTime.getTime(), darkTime.getTime());
+
+        this._themeController.switchTheme(isDark, true, this._manualModeActive);
+        // Only apply static brightness if NOT in a transition window
+        // The scheduled brightness loop handles gradual transitions
+        if (!this._brightnessController.isInTransitionWindow()) {
+            this._brightnessController.updateBrightness(true).catch(e => {
+                debugWarn('ExtensionController: Failed to update brightness on initial schedule:', e);
+            });
         }
+        this._debugInfo.currentMode = isDark ? 'night' : 'day';
 
-        const secondsToNextEvent = Math.round((nextEventTime.getTime() - now.getTime()) / MS_PER_SECOND);
-
-        this._debugInfo.nextEventTime = nextEventTime.toLocaleString();
+        this._debugInfo.nextEventTime = new Date(nextEventTimestamp).toLocaleString();
         // Absolute timestamp is the source of truth for the countdown;
         // getDebugInfo() derives fresh remaining seconds from it at read time.
-        this._debugInfo.nextEventTimestamp = nextEventTime.getTime();
+        this._debugInfo.nextEventTimestamp = nextEventTimestamp;
         this._debugInfo.secondsToNextEvent = secondsToNextEvent;
-        this._debugInfo.nextEventType = switchToDark ? 'dark' : 'light';
+        this._debugInfo.nextEventType = isDark ? 'light' : 'dark';
 
         this._scheduleTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, secondsToNextEvent, () => {
             // Defensive: if we entered manual mode after this timer was scheduled
@@ -512,12 +495,12 @@ export class ExtensionController {
                 return GLib.SOURCE_REMOVE;
             }
 
-            this._themeController.switchTheme(switchToDark, true, this._manualModeActive);
-            // Apply brightness at theme switch time (this is the END of a transition, not during)
-            // At switch time, we should apply the target brightness (light or dark)
-            this._brightnessController.updateBrightness(true).catch(e => {
-                console.error('ExtensionController: Failed to update brightness on scheduled event:', e);
-            });
+            // Single writer: re-derive instead of applying this closure's stale
+            // target. _scheduleNextChangeEvent determines the correct mode for
+            // "now" and applies theme + brightness itself. Having this callback
+            // ALSO switch (to a target chosen when the timer was armed) meant two
+            // writers could disagree at the boundary and flip the theme back and
+            // forth — the issue #10 freeze/flicker.
             this._scheduleNextChangeEvent();
             return GLib.SOURCE_REMOVE;
         });

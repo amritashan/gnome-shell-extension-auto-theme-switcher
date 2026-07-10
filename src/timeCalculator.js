@@ -26,6 +26,39 @@ export function secondsUntilEvent(eventTimestampMs, nowMs) {
     return Math.max(0, Math.round((eventTimestampMs - nowMs) / 1000));
 }
 
+/**
+ * Derive the active mode and the next switch event for a given moment.
+ *
+ * Single source of truth for the schedule boundary (issue #10): the timer
+ * delay is clamped to >= 1 second so a timer that fires moments before the
+ * boundary re-arms for the next second instead of at 0s. An unclamped
+ * Math.round gave 0 there, and a 0s GLib timer re-entered the scheduler at
+ * main-loop speed while the callback's stale-closure switch and the fresh
+ * re-derivation disagreed about the mode — flipping the whole desktop's
+ * theme tens of thousands of times in under a second.
+ *
+ * @param {number} nowMs - Current time as epoch milliseconds
+ * @param {number} lightTimeMs - Today's switch-to-light time (epoch ms)
+ * @param {number} darkTimeMs - Today's switch-to-dark time (epoch ms)
+ * @returns {{isDark: boolean, nextEventTimestamp: number, secondsToNextEvent: number}}
+ */
+export function computeNextEvent(nowMs, lightTimeMs, darkTimeMs) {
+    const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+    const isDark = nowMs >= darkTimeMs || nowMs < lightTimeMs;
+    let nextEventTimestamp;
+    if (!isDark) {
+        nextEventTimestamp = darkTimeMs;
+    } else if (nowMs < lightTimeMs) {
+        nextEventTimestamp = lightTimeMs;
+    } else {
+        nextEventTimestamp = lightTimeMs + MS_PER_DAY;
+    }
+
+    const secondsToNextEvent = Math.max(1, Math.round((nextEventTimestamp - nowMs) / 1000));
+    return { isDark, nextEventTimestamp, secondsToNextEvent };
+}
+
 export class TimeCalculator {
     /**
      * Parse a trigger setting and return the corresponding time
