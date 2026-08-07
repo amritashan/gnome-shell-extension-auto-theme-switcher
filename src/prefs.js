@@ -72,6 +72,65 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         return Array.from(themes).sort((a, b) => a.localeCompare(b));
     }
 
+    /**
+     * Get available Icons themes from all standard theme directories
+     * Handles NixOS and other non-standard Linux distributions
+     */
+    _getAvailableIcons() {
+        const themes = new Set();
+        const themeDirs = [];
+
+        // User theme directories
+        const homeDir = GLib.get_home_dir();
+        themeDirs.push(GLib.build_filenamev([homeDir, '.icons']));
+        themeDirs.push(GLib.build_filenamev([homeDir, '.local', 'share', 'icons']));
+
+        // System theme directories from XDG_DATA_DIRS (works on NixOS)
+        const dataDirs = GLib.get_system_data_dirs();
+        for (const dataDir of dataDirs) {
+            themeDirs.push(GLib.build_filenamev([dataDir, 'icons']));
+        }
+
+        // Check each directory for themes
+        for (const dirPath of themeDirs) {
+            try {
+                const dir = Gio.File.new_for_path(dirPath);
+                if (!dir.query_exists(null)) {
+                    continue;
+                }
+
+                const enumerator = dir.enumerate_children(
+                    'standard::name,standard::type',
+                    Gio.FileQueryInfoFlags.NONE,
+                    null
+                );
+
+                let info;
+                while ((info = enumerator.next_file(null))) {
+                    const name = info.get_name();
+
+                    // Skip hidden folders
+                    if (name.startsWith('.')) {
+                        continue;
+                    }
+
+                    // Add directories and symbolic links (NixOS uses symlinks to Nix store)
+                    const fileType = info.get_file_type();
+                    if (fileType === Gio.FileType.DIRECTORY ||
+                        fileType === Gio.FileType.SYMBOLIC_LINK) {
+                        themes.add(name);
+                    }
+                }
+            } catch (e) {
+                // Directory doesn't exist or isn't readable - skip it
+                debugLog(`Prefs: Could not read icons themes directory ${dirPath}: ${e.message}`);
+            }
+        }
+
+        // Convert to sorted array
+        return Array.from(themes).sort((a, b) => a.localeCompare(b));
+    }
+
     fillPreferencesWindow(window) {
         debugLog('Prefs: fillPreferencesWindow called');
         this.settings = this.getSettings();
@@ -131,6 +190,7 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
 
         // Get available themes from all theme directories
         const availableThemes = this._getAvailableThemes();
+        const availableIconThemes = this._getAvailableIcons();
 
         // Light Theme Dropdown
         const lightThemeRow = new Adw.ComboRow({
@@ -144,6 +204,18 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         lightThemeRow.model = lightThemeModel;
         themeGroup.add(lightThemeRow);
 
+        // Light Icon Theme Dropdown
+        const lightIconRow = new Adw.ComboRow({
+            title: 'Light Icons',
+            subtitle: 'Icon theme to use during the day',
+        });
+        const lightIconModel = new Gtk.StringList();
+        for (const theme of availableIconThemes) {
+            lightIconModel.append(theme);
+        }
+        lightIconRow.model = lightIconModel;
+        themeGroup.add(lightIconRow);
+
         // Dark Theme Dropdown
         const darkThemeRow = new Adw.ComboRow({
             title: 'Dark Theme',
@@ -155,6 +227,18 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
         }
         darkThemeRow.model = darkThemeModel;
         themeGroup.add(darkThemeRow);
+
+        // Dark Icon Theme Dropdown
+        const darkIconRow = new Adw.ComboRow({
+            title: 'Dark Icons',
+            subtitle: 'Icon theme to use at night',
+        });
+        const darkIconModel = new Gtk.StringList();
+        for (const theme of availableIconThemes) {
+            darkIconModel.append(theme);
+        }
+        darkIconRow.model = darkIconModel;
+        themeGroup.add(darkIconRow);
 
         // True Light Mode Toggle
         const trueLightModeRow = new Adw.ActionRow({
@@ -815,11 +899,20 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
 
         // --- Bind settings to UI widgets ---
         const savedLightTheme = this.settings.get_string('light-theme');
+        const savedLightIcons = this.settings.get_string('light-icon');
         const savedDarkTheme = this.settings.get_string('dark-theme');
+        const savedDarkIcons = this.settings.get_string('dark-icon');
 
         for (let i = 0; i < lightThemeModel.get_n_items(); i++) {
             if (lightThemeModel.get_string(i) === savedLightTheme) {
                 lightThemeRow.selected = i;
+                break;
+            }
+        }
+
+        for (let i = 0; i < lightIconModel.get_n_items(); i++) {
+            if (lightIconModel.get_string(i) === savedLightIcons) {
+                lightIconRow.selected = i;
                 break;
             }
         }
@@ -831,6 +924,13 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             }
         }
 
+        for (let i = 0; i < darkIconModel.get_n_items(); i++) {
+            if (darkIconModel.get_string(i) === savedDarkIcons) {
+                darkIconRow.selected = i;
+                break;
+            }
+        }
+
         lightThemeRow.connect('notify::selected', () => {
             const selected = lightThemeRow.selected_item;
             if (selected) {
@@ -838,10 +938,24 @@ export default class ThemeSwitcherPreferences extends ExtensionPreferences {
             }
         });
 
+        lightIconRow.connect('notify::selected', () => {
+            const selected = lightIconRow.selected_item;
+            if (selected) {
+                this.settings.set_string('light-icon', selected.string);
+            }
+        });
+
         darkThemeRow.connect('notify::selected', () => {
             const selected = darkThemeRow.selected_item;
             if (selected) {
                 this.settings.set_string('dark-theme', selected.string);
+            }
+        });
+
+        darkIconRow.connect('notify::selected', () => {
+            const selected = darkIconRow.selected_item;
+            if (selected) {
+                this.settings.set_string('dark-icon', selected.string);
             }
         });
 
