@@ -10,9 +10,11 @@ export class ThemeController {
 
     switchTheme(isDark, showNotification = true, manualModeActive = false) {
         const theme = isDark ? this._settings.get_string('dark-theme') : this._settings.get_string('light-theme');
+        const icon = isDark ? this._settings.get_string('dark-icon') : this._settings.get_string('light-icon');
         const trueLightMode = this._settings.get_boolean('true-light-mode');
 
         const currentTheme = this._interfaceSettings.get_string('gtk-theme');
+        const currentIcon = this._interfaceSettings.get_string('icon-theme');
         const currentColorScheme = this._interfaceSettings.get_string('color-scheme');
 
         // Determine target color-scheme based on True Light Mode setting
@@ -28,26 +30,40 @@ export class ThemeController {
         }
 
         const themeAlreadySet = (currentTheme === theme && currentColorScheme === colorScheme);
+        const iconAlreadySet = (currentIcon === icon)
+
+        let shouldNotify = false;
 
         if (themeAlreadySet) {
             console.log(`ThemeSwitcher: Theme already set to ${isDark ? 'Dark' : 'Light'} (${theme}), no change needed`);
-            return;
+        }
+        else {
+          shouldNotify = true;
+          this._interfaceSettings.set_string('gtk-theme', theme);
+          this._interfaceSettings.set_string('color-scheme', colorScheme);
+
+          const nightLightMode = this._settings.get_string('night-light-mode');
+          if (nightLightMode === 'sync-with-theme') {
+              this._colorSettings.set_boolean('night-light-enabled', isDark);
+              console.log(`ThemeSwitcher: Night Light ${isDark ? 'enabled' : 'disabled'} (synced with theme)`);
+          } else if (nightLightMode === 'custom-schedule') {
+              this.updateNightLightSchedule();
+          }
+
+          console.log(`ThemeSwitcher: Switched to ${isDark ? 'Dark' : 'Light'} GTK theme (${theme}), color-scheme: ${colorScheme}, True Light Mode: ${trueLightMode ? 'enabled' : 'disabled'}`);
         }
 
-        this._interfaceSettings.set_string('gtk-theme', theme);
-        this._interfaceSettings.set_string('color-scheme', colorScheme);
+        if (iconAlreadySet) {
+            console.log(`ThemeSwitcher: Icon already set to ${isDark ? 'Dark' : 'Light'} (${icon}), no change needed`);
+        }
+        else {
+          shouldNotify = true;
+          this._interfaceSettings.set_string('icon-theme', icon);
 
-        const nightLightMode = this._settings.get_string('night-light-mode');
-        if (nightLightMode === 'sync-with-theme') {
-            this._colorSettings.set_boolean('night-light-enabled', isDark);
-            console.log(`ThemeSwitcher: Night Light ${isDark ? 'enabled' : 'disabled'} (synced with theme)`);
-        } else if (nightLightMode === 'custom-schedule') {
-            this.updateNightLightSchedule();
+          console.log(`ThemeSwitcher: Switched to ${isDark ? 'Dark' : 'Light'} Icon theme (${icon})`);
         }
 
-        console.log(`ThemeSwitcher: Switched to ${isDark ? 'Dark' : 'Light'} theme (${theme}), color-scheme: ${colorScheme}, True Light Mode: ${trueLightMode ? 'enabled' : 'disabled'}`);
-
-        if (showNotification && !manualModeActive && this._settings.get_boolean('show-notifications')) {
+        if (shouldNotify && showNotification && !manualModeActive && this._settings.get_boolean('show-notifications')) {
             const title = 'Auto Theme Switcher';
             const body = `Switched to ${isDark ? 'dark' : 'light'} mode`;
             const icon = isDark ? 'weather-clear-night-symbolic' : 'weather-clear-symbolic';

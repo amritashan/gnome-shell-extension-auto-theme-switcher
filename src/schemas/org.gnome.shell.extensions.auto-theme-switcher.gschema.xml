@@ -74,9 +74,19 @@
       <summary>The GTK theme to use during the day.</summary>
     </key>
 
+    <key name="light-icon" type="s">
+      <default>'Adwaita'</default>
+      <summary>The Icon theme to use during the day.</summary>
+    </key>
+
     <key name="dark-theme" type="s">
       <default>'Adwaita-dark'</default>
       <summary>The GTK theme to use at night.</summary>
+    </key>
+
+    <key name="dark-icon" type="s">
+      <default>'Adwaita'</default>
+      <summary>The Icon theme to use at night.</summary>
     </key>
 
     <key name="true-light-mode" type="b">
